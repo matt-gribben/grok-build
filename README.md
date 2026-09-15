@@ -54,13 +54,14 @@ features, and improvements in each release.
 ### Fork builds (matt-gribben/grok-build)
 
 This fork publishes GitHub Release binaries for macOS Apple Silicon, macOS
-Intel, and Linux x86_64. They install into `~/.grok-build` and do not replace
-an official `~/.grok` install.
+Intel, and Linux x86_64. They install as **`grok-cursor`** (never `grok`) into
+`~/.grok-cursor`, so official `grok` / `~/.grok` and source-build
+`~/.grok-build` stay untouched.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/matt-gribben/grok-build/main/scripts/install-fork.sh | bash
-export PATH="$HOME/.grok-build/bin:$PATH"
-grok --version
+export PATH="$HOME/.grok-cursor/bin:$PATH"
+grok-cursor --version
 ```
 
 Pin a tag with `VERSION=v1.0.24` (or `VERSION=nightly`) in the environment.
@@ -69,7 +70,7 @@ GitHub Actions builds on every `main` push (the `nightly` prerelease) and on
 download, Gatekeeper may require:
 
 ```sh
-xattr -d com.apple.quarantine ~/.grok-build/bin/grok
+xattr -d com.apple.quarantine ~/.grok-cursor/libexec/grok-cursor
 ```
 
 ## Building from source

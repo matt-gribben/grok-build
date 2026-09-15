@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# Install a prebuilt Grok Build binary from matt-gribben/grok-build GitHub Releases.
+# Install a prebuilt grok-cursor binary from matt-gribben/grok-build GitHub Releases.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/matt-gribben/grok-build/main/scripts/install-fork.sh | bash
 #   VERSION=nightly bash scripts/install-fork.sh
 #   VERSION=v1.0.24 bash scripts/install-fork.sh
 #
-# Installs to ~/.grok-build/bin/grok (and a grok-build alias). This is the same
-# isolated profile source builds use, so it does not replace an official
-# x.ai `grok` install in ~/.grok.
+# Installs as `grok-cursor` (never `grok`) under ~/.grok-cursor. Official Grok
+# (`~/.grok`, `grok` on PATH) and source-build `~/.grok-build` are left alone.
 
 set -euo pipefail
 
 REPO="${GROK_BUILD_REPO:-matt-gribben/grok-build}"
 VERSION="${VERSION:-}"
-PREFIX="${GROK_HOME:-${HOME}/.grok-build}"
+CMD_NAME="grok-cursor"
+PREFIX="${GROK_CURSOR_HOME:-${HOME}/.grok-cursor}"
 BIN_DIR="${PREFIX}/bin"
+LIBEXEC_DIR="${PREFIX}/libexec"
 
 uname_s="$(uname -s)"
 uname_m="$(uname -m)"
@@ -38,7 +39,7 @@ case "${uname_m}" in
     ;;
 esac
 
-asset="grok-${os}-${arch}"
+asset="grok-cursor-${os}-${arch}"
 api="https://api.github.com/repos/${REPO}/releases"
 
 if [ -z "${VERSION}" ]; then
@@ -49,8 +50,8 @@ if [ -z "${VERSION}" ]; then
 fi
 
 url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
-mkdir -p "${BIN_DIR}"
-tmp="$(mktemp "${TMPDIR:-/tmp}/grok-XXXXXX")"
+mkdir -p "${BIN_DIR}" "${LIBEXEC_DIR}"
+tmp="$(mktemp "${TMPDIR:-/tmp}/grok-cursor-XXXXXX")"
 trap 'rm -f "${tmp}"' EXIT
 
 echo "Downloading ${url}"
@@ -61,10 +62,23 @@ if ! curl -fL --retry 3 --retry-delay 2 -o "${tmp}" "${url}"; then
 fi
 chmod +x "${tmp}"
 
-dest="${BIN_DIR}/grok"
-mv "${tmp}" "${dest}"
+payload="${LIBEXEC_DIR}/${CMD_NAME}"
+mv "${tmp}" "${payload}"
 trap - EXIT
-ln -sfn grok "${BIN_DIR}/grok-build"
+
+wrapper="${BIN_DIR}/${CMD_NAME}"
+cat >"${wrapper}" <<EOF
+#!/usr/bin/env bash
+# Keep fork state out of official ~/.grok and source-build ~/.grok-build.
+export GROK_HOME="\${GROK_HOME:-${PREFIX}}"
+exec "${payload}" "\$@"
+EOF
+chmod +x "${wrapper}"
+
+# Drop a PATH-friendly copy when ~/.local/bin already exists, without naming it grok.
+if [ -d "${HOME}/.local/bin" ]; then
+  ln -sfn "${wrapper}" "${HOME}/.local/bin/${CMD_NAME}"
+fi
 
 config="${PREFIX}/config.toml"
 if [ ! -f "${config}" ]; then
@@ -87,19 +101,20 @@ elif ! grep -q '^[[:space:]]*auto_update' "${config}"; then
 fi
 
 case ":${PATH}:" in
-  *":${BIN_DIR}:"*) on_path=1 ;;
+  *":${BIN_DIR}:"* | *":${HOME}/.local/bin:"*) on_path=1 ;;
   *) on_path=0 ;;
 esac
 
 echo
-echo "Installed ${dest}"
-"${dest}" --version || true
+echo "Installed ${wrapper}"
+GROK_HOME="${PREFIX}" "${payload}" --version || true
 echo
 if [ "${on_path}" -eq 0 ]; then
   echo "Add this to your shell profile:"
   echo "  export PATH=\"${BIN_DIR}:\$PATH\""
   echo
 fi
-echo "This fork uses ${PREFIX} (not ~/.grok). Official Grok is unchanged."
+echo "Run it as: ${CMD_NAME}"
+echo "Profile: ${PREFIX} (official grok keeps ~/.grok; source builds keep ~/.grok-build)."
 echo "macOS may quarantine unsigned downloads; if launch is blocked:"
-echo "  xattr -d com.apple.quarantine \"${dest}\""
+echo "  xattr -d com.apple.quarantine \"${payload}\""

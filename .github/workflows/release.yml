@@ -72,15 +72,15 @@ jobs:
           src="target/${{ matrix.target }}/release/xai-grok-pager"
           strip "$src" || true
           mkdir -p dist
-          cp "$src" "dist/grok-${{ matrix.asset }}"
-          chmod +x "dist/grok-${{ matrix.asset }}"
-          (cd dist && shasum -a 256 "grok-${{ matrix.asset }}" > "grok-${{ matrix.asset }}.sha256")
-          file "dist/grok-${{ matrix.asset }}"
-          "dist/grok-${{ matrix.asset }}" --version
+          cp "$src" "dist/grok-cursor-${{ matrix.asset }}"
+          chmod +x "dist/grok-cursor-${{ matrix.asset }}"
+          (cd dist && shasum -a 256 "grok-cursor-${{ matrix.asset }}" > "grok-cursor-${{ matrix.asset }}.sha256")
+          file "dist/grok-cursor-${{ matrix.asset }}"
+          "dist/grok-cursor-${{ matrix.asset }}" --version
 
       - uses: actions/upload-artifact@v4
         with:
-          name: grok-${{ matrix.asset }}
+          name: grok-cursor-${{ matrix.asset }}
           path: dist/*
           if-no-files-found: error
 
@@ -120,12 +120,12 @@ jobs:
           set -euo pipefail
           cd dist
           for asset in linux-x86_64 macos-aarch64 macos-x86_64; do
-            cp "grok-${asset}" "grok-${{ steps.meta.outputs.version }}-${asset}"
-            cp "grok-${asset}.sha256" "grok-${{ steps.meta.outputs.version }}-${asset}.sha256"
-            sed -i "s/grok-${asset}/grok-${{ steps.meta.outputs.version }}-${asset}/" \
-              "grok-${{ steps.meta.outputs.version }}-${asset}.sha256"
+            cp "grok-cursor-${asset}" "grok-cursor-${{ steps.meta.outputs.version }}-${asset}"
+            cp "grok-cursor-${asset}.sha256" "grok-cursor-${{ steps.meta.outputs.version }}-${asset}.sha256"
+            sed -i "s/grok-cursor-${asset}/grok-cursor-${{ steps.meta.outputs.version }}-${asset}/" \
+              "grok-cursor-${{ steps.meta.outputs.version }}-${asset}.sha256"
           done
-          cat grok-*.sha256 > SHA256SUMS
+          cat grok-cursor-*.sha256 > SHA256SUMS
           ls -l
 
       - uses: softprops/action-gh-release@v2
