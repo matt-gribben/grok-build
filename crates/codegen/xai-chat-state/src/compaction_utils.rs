@@ -386,6 +386,7 @@ pub fn extract_messages_since_last_user(
             ConversationItem::ToolResult(t) => Some(ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: t.tool_call_id.clone(),
                 content: std::sync::Arc::<str>::from("Tool call omitted..."),
+                is_error: t.is_error,
                 images: Vec::new(),
             })),
             _ => None,
@@ -412,6 +413,7 @@ pub fn extract_messages_since_last_real_user(
             ConversationItem::ToolResult(t) => Some(ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: t.tool_call_id.clone(),
                 content: std::sync::Arc::<str>::from("Tool call omitted..."),
+                is_error: t.is_error,
                 images: Vec::new(),
             })),
             _ => None,
@@ -485,6 +487,7 @@ fn extract_messages_since_last_compaction_anchor(
                 Some(ConversationItem::ToolResult(ToolResultItem {
                     tool_call_id: result.tool_call_id.clone(),
                     content: std::sync::Arc::<str>::from("Tool call omitted..."),
+                    is_error: result.is_error,
                     images: Vec::new(),
                 }))
             }

@@ -14,6 +14,13 @@ pub mod attribution;
 pub mod client;
 pub mod commands;
 pub mod config;
+pub mod cursor_catalog;
+pub mod cursor_connect;
+mod cursor_proto;
+pub mod cursor_request;
+pub(crate) mod cursor_runtime;
+pub mod cursor_transport;
+pub mod cursor_wire;
 pub mod doom_loop;
 mod doom_loop_recovery;
 pub mod events;
@@ -39,6 +46,7 @@ pub use config::{
     AuthScheme, BearerResolver, HeaderInjector, OriginClientInfo, RetryPolicy, SamplerConfig,
     SharedBearerResolver, SharedHeaderInjector,
 };
+pub use cursor_runtime::cancel_cursor_session;
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{
     SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason,

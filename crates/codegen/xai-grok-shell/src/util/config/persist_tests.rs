@@ -240,6 +240,32 @@ fn merge_section_preserves_unmodeled_fields_inside_a_nested_table() {
         Some("command")
     );
 }
+
+#[test]
+fn cursor_subscription_setting_is_saved_in_ui_and_preserves_neighbors() {
+    let mut root: TomlValue =
+        toml::from_str("[ui]\ntheme = 'groknight'\ncustom_user_key = 'keep-me'\n").unwrap();
+    let cfg = crate::agent::config::UiConfig {
+        cursor_provider_enabled: Some(true),
+        ..Default::default()
+    };
+    merge_section(root.as_table_mut().unwrap(), "ui", &cfg);
+    let ui = root.get("ui").and_then(TomlValue::as_table).unwrap();
+    assert_eq!(
+        ui.get("cursor_provider_enabled")
+            .and_then(TomlValue::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        ui.get("theme").and_then(TomlValue::as_str),
+        Some("groknight")
+    );
+    assert_eq!(
+        ui.get("custom_user_key").and_then(TomlValue::as_str),
+        Some("keep-me")
+    );
+}
+
 #[test]
 fn merge_section_preserves_unmodeled_fields() {
     let mut table = TomlMap::new();

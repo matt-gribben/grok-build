@@ -984,6 +984,9 @@ pub enum ApiBackend {
     Responses,
     /// Use the Anthropic Messages API (/v1/messages)
     Messages,
+    /// Use the signed-in Cursor Desktop session over Cursor's private Connect protocol.
+    /// Cursor ignores the configured API URL and API key; its dedicated adapter owns auth and routing.
+    Cursor,
 }
 
 impl ApiBackend {

@@ -843,6 +843,26 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        SettingMeta {
+            key: "cursor_provider_enabled",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Cursor subscription models",
+            description: "Discover models available through your signed-in Cursor Desktop session. Uses the local Cursor credentials already on this machine; restart Grok Build after changing this setting.",
+            keywords: &[
+                "cursor",
+                "subscription",
+                "provider",
+                "models",
+                "inference",
+                "account",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.cursor_provider_enabled.unwrap_or(false),
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
         // SHARED. `u16` in UiConfig, widened to `i64` for registry.
         // Width changes apply on the next render frame.
         SettingMeta {

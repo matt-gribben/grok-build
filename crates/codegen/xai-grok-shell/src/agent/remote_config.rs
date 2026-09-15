@@ -2,6 +2,7 @@
 
 mod cache;
 mod cache_file;
+mod cursor_catalog;
 mod endpoint;
 mod fetch;
 mod manager;

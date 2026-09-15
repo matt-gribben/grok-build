@@ -8,7 +8,7 @@ Three files configure Grok Build, and they are written by different people.
 
 | File | Who writes it | Where it lives | Use it to |
 | --- | --- | --- | --- |
-| `config.toml` | The developer | `~/.grok/config.toml`, and `.grok/config.toml` in a project | Set personal defaults. Anything here can be changed by the person using the machine. |
+| `config.toml` | The developer | `$GROK_HOME/config.toml` (default `~/.grok`; source builds use `~/.grok-build`), and `.grok/config.toml` in a project | Set personal defaults. Anything here can be changed by the person using the machine. |
 | `managed_config.toml` | You, through the console or a deployment tool | `/etc/grok/managed_config.toml` | Ship a starting point to a fleet. A developer's own file overrides it. |
 | `requirements.toml` | You, signed | `/etc/grok/requirements.toml`, or macOS device management | Set values a developer cannot change. Keys marked `pin` below hold against every other file, the environment, and the command line. |
 
@@ -18,7 +18,7 @@ Grok Build also reads these layers, later rows winning except where a requiremen
 
 1. Compiled defaults.
 2. `/etc/grok/managed_config.toml`, then `$GROK_HOME/managed_config.toml` (fleet defaults; console-synced).
-3. `$GROK_HOME/config.toml` (your settings; `/settings` writes here). Default `$GROK_HOME` is `~/.grok`.
+3. `$GROK_HOME/config.toml` (your settings; `/settings` writes here). Packaged Grok defaults `$GROK_HOME` to `~/.grok`; source builds default to `~/.grok-build` so their state stays separate. An explicit `GROK_HOME` overrides either default.
 4. Project `.grok/config.toml`: only `[mcp_servers]`, `[plugins]`, `[permission]`, and `[mcp] max_output_bytes`.
 5. `GROK_CONFIG` (inline JSON) or `GROK_CONFIG_PATH` (JSON or TOML file). Allowlisted keys only.
 6. `$GROK_HOME/requirements.toml`, then `/etc/grok/requirements.toml`, then macOS MDM `ai.x.grok`. Admin layer. Keys marked `pin` in the table cannot be overridden; keys marked `yes` are also valid in this file.
@@ -29,7 +29,7 @@ Run `grok inspect` or `grok inspect --json` to see which files and values won.
 
 ## config.toml
 
-User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/config.toml`; Windows `%USERPROFILE%\.grok\config.toml`). Project-scoped overrides live in `.grok/config.toml` and only contribute `[mcp_servers]`, `[plugins]`, `[permission]`, and `[mcp] max_output_bytes`.
+User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/config.toml` for packaged Grok and `~/.grok-build/config.toml` for source builds; Windows follows the same profile name under `%USERPROFILE%`). Project-scoped overrides live in `.grok/config.toml` and only contribute `[mcp_servers]`, `[plugins]`, `[permission]`, and `[mcp] max_output_bytes`.
 
 **Requirements** marks whether the same key can be set in `requirements.toml`: `pin` cannot be overridden (including env and CLI where the resolver honors the pin); `yes` is accepted in that file; `—` is not read from `requirements.toml`. **Managed** marks whether a fleet `managed_config.toml` value stands (`fleet`) or the user's file wins (`user`).
 
@@ -356,7 +356,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | --- | --- | --- | --- | --- |
 | `model.<id>` | `table` | `yes` | `user` | Per-model override or BYOK definition. Prefer `env_key` over inline `api_key`. |
 | `model.<id>.agent_type` | `string` | `yes` | `user` | Agent definition type associated with this model. |
-| `model.<id>.api_backend` | `chat_completions / responses / messages` | `yes` | `user` | Wire protocol for this model. |
+| `model.<id>.api_backend` | `chat_completions / responses / messages / cursor` | `yes` | `user` | Wire protocol for this model. `cursor` is experimental and uses the signed-in Cursor Desktop session; see [Custom Models](11-custom-models.md#use-a-cursor-subscription). |
 | `model.<id>.api_base_url` | `string` | `yes` | `user` | Alternate API base used with XAI_API_KEY resolution. |
 | `model.<id>.api_key` | `string` | `yes` | `user` | Inline API key. Prefer `env_key`. Not a secret to put in a shared repo. |
 | `model.<id>.auth_provider` | `string` | `yes` | `user` | Name of a `[auth_provider.<name>]` helper that mints this model's bearer token. |
@@ -398,6 +398,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `model_providers.<name>` | `table` | `yes` | `user` | Named custom model provider definition. |
+| `model_providers.<name>.api_backend` | `chat_completions / responses / messages / cursor` | `yes` | `user` | Provider wire protocol. The experimental Cursor backend uses the signed-in Cursor Desktop session; see [Custom Models](11-custom-models.md#use-a-cursor-subscription). |
 
 ### `models`
 
@@ -590,6 +591,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `ui.contextual_hints.undo` | `boolean` | `yes` | `user` | Ctrl+Z restores a wiped prompt draft tip. |
 | `ui.contextual_hints.word_select` | `boolean` | `yes` | `user` | After double-click with fold/nav selection, point at Word select in settings. |
 | `ui.cursor_blink` | `boolean` | `yes` | `user` | Force blinking (true) or steady (false) block cursor. Unset inherits the terminal. |
+| `ui.cursor_provider_enabled` | `boolean` | `yes` | `user` | Enable Cursor subscription model discovery. Set this in Settings → Models; restart required. |
 | `ui.default_selected_permission` | `string` | `yes` | `user` | Preselected approval row on the first prompt of a session. Also GROK_DEFAULT_SELECTED_PERMISSION. |
 | `ui.display_refresh.auto_cadence_enabled` | `boolean` | `yes` | `user` | Match stream/scroll cadence to display refresh rate. Also GROK_DISPLAY_REFRESH_AUTO_CADENCE. |
 | `ui.follow_up_behavior` | `queue / steer` | `yes` | `user` | Mid-turn follow-up routing. |

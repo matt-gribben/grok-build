@@ -518,7 +518,11 @@ pub(crate) mod chat_rebuild {
             out.extend(self.flush_agent());
 
             let content = extract_tool_result_text(fields);
-            let item = ConversationItem::tool_result(id.to_string(), content);
+            let item = if fields.status == Some(acp::ToolCallStatus::Failed) {
+                ConversationItem::tool_result_error(id.to_string(), content)
+            } else {
+                ConversationItem::tool_result(id.to_string(), content)
+            };
             self.item_count += 1;
             out.push(item);
             out
@@ -2196,6 +2200,15 @@ mod tests {
             ))
         }
 
+        fn tool_failed(id: &str, output: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(id),
+                acp::ToolCallUpdateFields::new()
+                    .status(Some(acp::ToolCallStatus::Failed))
+                    .raw_output(Some(serde_json::json!(output))),
+            ))
+        }
+
         fn rebuild(updates: Vec<acp::SessionUpdate>) -> Vec<ConversationItem> {
             let sid = acp::SessionId::new(Arc::from("s"));
             let dir = tempfile::tempdir().unwrap();
@@ -2274,6 +2287,19 @@ mod tests {
                     (framed("ok run the stop for me"), true),
                 ]
             );
+        }
+
+        #[test]
+        fn failed_tool_result_replays_with_error_status() {
+            let items = rebuild(vec![
+                tool_call("failed-call"),
+                tool_failed("failed-call", "denied"),
+            ]);
+            assert!(matches!(
+                items.last(),
+                Some(ConversationItem::ToolResult(result))
+                    if result.tool_call_id == "failed-call" && result.is_error
+            ));
         }
 
         /// A batch drain pushes one item per interjection; a following prompt echo must not join the last one.

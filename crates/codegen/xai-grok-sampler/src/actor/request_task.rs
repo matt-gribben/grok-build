@@ -90,7 +90,14 @@ pub(crate) async fn run_request_task(
             .idle_timeout_secs
             .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
     );
-    let configured_max_retries = config.max_retries.or(Some(retry_policy.max_retries));
+    // A Cursor Run may have reached Cursor even when the client sees no output,
+    // so retrying could duplicate a turn. Cursor retries are disabled until its
+    // private protocol exposes an idempotent request contract.
+    let configured_max_retries = if config.api_backend == ApiBackend::Cursor {
+        Some(0)
+    } else {
+        config.max_retries.or(Some(retry_policy.max_retries))
+    };
     let max_retries = if configured_max_retries == Some(0) {
         0
     } else {
@@ -99,21 +106,37 @@ pub(crate) async fn run_request_task(
 
     // Build the initial client
     // Configuration errors here are fatal (no point retrying with the same broken config)
-    let mut client = match SamplingClient::new(config.clone()) {
-        Ok(c) => c,
-        Err(err) => {
-            let terminal_event_queued = emit_failed(&event_tx, &request_id, &err);
-            send_completion(&mut completion, Err(err), terminal_event_queued);
-            return request_id;
+    let mut client = if config.api_backend == ApiBackend::Cursor {
+        None
+    } else {
+        match SamplingClient::new(config.clone()) {
+            Ok(c) => Some(c),
+            Err(err) => {
+                let terminal_event_queued = emit_failed(&event_tx, &request_id, &err);
+                send_completion(&mut completion, Err(err), terminal_event_queued);
+                return request_id;
+            }
         }
     };
+
+    let auth_info = client.as_ref().map_or_else(
+        || crate::sampling_log::AuthInfo {
+            auth_type: "cursor_desktop",
+            auth_prefix: None,
+        },
+        SamplingClient::auth_info,
+    );
 
     let sampling_span = crate::sampling_log::request_span(
         &request_id,
         &config.model,
-        &format!("{:?}", client.api_backend()),
-        &config.base_url,
-        &client.auth_info(),
+        &format!("{:?}", config.api_backend),
+        if config.api_backend == ApiBackend::Cursor {
+            "cursor-desktop"
+        } else {
+            &config.base_url
+        },
+        &auth_info,
     );
     if let Some(eff) = config.reasoning_effort {
         sampling_span.record("reasoning_effort", eff.as_ref());
@@ -140,7 +163,8 @@ pub(crate) async fn run_request_task(
         // Once the resample budget is spent, the attempt runs with the abort disarmed so it can complete and be accepted as-is
         let doom_check = doom_policy.filter(|_| doom_retry_count < doom_max_retries);
         let outcome = run_one_attempt(
-            &client,
+            client.as_ref(),
+            &config,
             request.clone(),
             request_id.clone(),
             idle_timeout,
@@ -232,7 +256,7 @@ pub(crate) async fn run_request_task(
                     &event_tx,
                     &request_id,
                     &mut request,
-                    &mut client,
+                    client.as_mut(),
                     &config,
                     &cancel_token,
                     &mut completion,
@@ -307,7 +331,7 @@ pub(crate) async fn run_request_task(
                     &event_tx,
                     &request_id,
                     &mut request,
-                    &mut client,
+                    client.as_mut(),
                     &config,
                     &cancel_token,
                     &mut completion,
@@ -331,7 +355,7 @@ pub(crate) async fn run_request_task(
                     &event_tx,
                     &request_id,
                     &mut request,
-                    &mut client,
+                    client.as_mut(),
                     &config,
                     &cancel_token,
                     &mut completion,
@@ -357,7 +381,7 @@ async fn apply_retry_decision(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
     request: &mut ConversationRequest,
-    client: &mut SamplingClient,
+    client: Option<&mut SamplingClient>,
     config: &SamplerConfig,
     cancel_token: &CancellationToken,
     completion: &mut CompletionState,
@@ -445,6 +469,11 @@ async fn apply_retry_decision(
             }
 
             // Rebuild client with HTTP/1.1 fallback to escape poisoned HTTP/2 connection pools
+            let Some(client) = client else {
+                let terminal_event_queued = emit_failed(event_tx, request_id, err);
+                send_completion(completion, Err(clone_error(err)), terminal_event_queued);
+                return false;
+            };
             let mut http1_config = config.clone();
             http1_config.force_http1 = true;
             match SamplingClient::new(http1_config) {
@@ -525,7 +554,8 @@ async fn sleep_or_cancel(
 /// `None` disarms the mid-stream abort and the terminal confidence check so the attempt completes and its response can be accepted.
 #[allow(clippy::too_many_arguments)]
 async fn run_one_attempt(
-    client: &SamplingClient,
+    client: Option<&SamplingClient>,
+    config: &SamplerConfig,
     request: ConversationRequest,
     request_id: RequestId,
     idle_timeout: Duration,
@@ -535,6 +565,40 @@ async fn run_one_attempt(
     output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
     let length_policy = request.length_policy;
+    if config.api_backend == ApiBackend::Cursor {
+        let l2 = match crate::cursor_runtime::open_run_stream(
+            config,
+            request,
+            request_id.clone(),
+            idle_timeout,
+            cancel_token.clone(),
+        )
+        .await
+        {
+            Ok(stream) => stream,
+            Err(error) => return AttemptOutcome::InitFailed { error },
+        };
+        let captured = Arc::new(Mutex::new(None));
+        return drive_l2(
+            l2,
+            request_id,
+            event_tx,
+            cancel_token,
+            captured,
+            doom_check,
+            FailedResponseCapture::default(),
+            output_observed,
+            length_policy,
+        )
+        .await;
+    }
+    let Some(client) = client else {
+        return AttemptOutcome::InitFailed {
+            error: SamplingError::InvalidConfiguration(
+                "non-Cursor request has no configured sampling client",
+            ),
+        };
+    };
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
             let (raw, metadata) = match client.conversation_stream(request).await {
@@ -616,6 +680,11 @@ async fn run_one_attempt(
             )
             .await
         }
+        ApiBackend::Cursor => AttemptOutcome::InitFailed {
+            error: SamplingError::InvalidConfiguration(
+                "Cursor cannot use the OpenAI-compatible sampling client",
+            ),
+        },
     }
 }
 
@@ -1500,7 +1569,7 @@ mod tests {
             &event_tx,
             &RequestId::from("cancel-backoff"),
             &mut request,
-            &mut client,
+            Some(&mut client),
             &config,
             &cancel_token,
             &mut completion,

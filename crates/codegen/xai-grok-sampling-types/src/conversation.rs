@@ -248,10 +248,17 @@ pub struct ToolResultItem {
     pub tool_call_id: String,
     /// The result content
     pub content: Arc<str>,
+    /// Whether the host tool or its permission gate reported a failure.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
     /// Inline images associated with this tool result (e.g. from `read_file` on an image/PDF).
     /// When non-empty, the API conversion layers embed these directly in the tool result message rather than in a separate follow-up user message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ContentPart>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// A server-side tool call from the backend agentic sampler.
@@ -1223,6 +1230,18 @@ impl ConversationItem {
         Self::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.into(),
             content: Arc::<str>::from(content.into()),
+            is_error: false,
+            images: Vec::new(),
+        })
+    }
+
+    /// Create a failed tool result, preserving the host's error outcome for
+    /// backends such as Cursor that distinguish an MCP error response.
+    pub fn tool_result_error(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::ToolResult(ToolResultItem {
+            tool_call_id: tool_call_id.into(),
+            content: Arc::<str>::from(content.into()),
+            is_error: true,
             images: Vec::new(),
         })
     }
@@ -1238,6 +1257,21 @@ impl ConversationItem {
         Self::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.into(),
             content: Arc::<str>::from(content.into()),
+            is_error: false,
+            images,
+        })
+    }
+
+    /// Create a failed tool result with associated image content.
+    pub fn tool_result_error_with_images(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        images: Vec<ContentPart>,
+    ) -> Self {
+        Self::ToolResult(ToolResultItem {
+            tool_call_id: tool_call_id.into(),
+            content: Arc::<str>::from(content.into()),
+            is_error: true,
             images,
         })
     }
@@ -2201,6 +2235,7 @@ mod tests {
             crate::ApiBackend::ChatCompletions,
             crate::ApiBackend::Responses,
             crate::ApiBackend::Messages,
+            crate::ApiBackend::Cursor,
         ] {
             let on_wire = match backend {
                 crate::ApiBackend::Responses => {
@@ -2223,6 +2258,7 @@ mod tests {
                         .get("prompt_cache_key")
                         .is_some()
                 }
+                crate::ApiBackend::Cursor => false,
             };
             assert_eq!(
                 on_wire,
@@ -3947,6 +3983,34 @@ mod tests {
         } else {
             panic!("Expected ToolResult");
         }
+    }
+
+    #[test]
+    fn tool_result_error_round_trips_and_legacy_results_default_to_success() {
+        let failed = ConversationItem::tool_result_error("call_1", "permission denied");
+        let json = serde_json::to_value(&failed).expect("serialize failed result");
+        assert_eq!(json["is_error"], true);
+        assert!(matches!(
+            serde_json::from_value::<ConversationItem>(json),
+            Ok(ConversationItem::ToolResult(ToolResultItem {
+                is_error: true,
+                ..
+            }))
+        ));
+
+        let legacy: ConversationItem = serde_json::from_value(serde_json::json!({
+            "type": "tool_result",
+            "tool_call_id": "call_1",
+            "content": "ok"
+        }))
+        .expect("deserialize legacy tool result");
+        assert!(matches!(
+            legacy,
+            ConversationItem::ToolResult(ToolResultItem {
+                is_error: false,
+                ..
+            })
+        ));
     }
 
     // ── SyntheticReason tests ─────────────────────────────────────────────────

@@ -227,6 +227,8 @@ prometheus = { version = "0.14", features = ["process"] }
 prost = "0.14"
 prost-build = "0.14"
 prost-reflect = "0.16"
+prost-types = "0.14"
+protoc-bin-vendored = "3.2.0"
 pulldown-cmark = "0.13"
 quick-xml = "0.41"
 rand = "0.9"
@@ -383,6 +385,7 @@ xai-tty-utils = { path = "crates/codegen/xai-tty-utils" }
 zbus = { version = "5" }
 zip = "3"
 zstd = "0.13"
+zeroize = "1.8"
 
 [profile.release]
 incremental = true

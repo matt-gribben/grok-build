@@ -215,6 +215,42 @@ pub(in crate::app::dispatch) fn set_voice_keybind_enabled(
     }]
 }
 
+/// Mirror Cursor model-discovery opt-in into the live UI config.
+pub(super) fn set_cursor_provider_enabled_inner(app: &mut AppView, enabled: bool) {
+    app.current_ui.cursor_provider_enabled = Some(enabled);
+}
+
+/// Set whether Grok Build discovers models from the signed-in Cursor Desktop session.
+/// Restart-required because account-specific model discovery runs during startup.
+pub(in crate::app::dispatch) fn set_cursor_provider_enabled(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = app.current_ui.cursor_provider_enabled;
+    let previous_effective = previous.unwrap_or(false);
+    if previous_effective == enabled && previous.is_some() {
+        return vec![];
+    }
+    set_cursor_provider_enabled_inner(app, enabled);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "cursor_provider_enabled",
+        value = enabled,
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "{} (restart to {} Cursor models)",
+        save_success_toast("Cursor subscription", enabled),
+        if enabled { "load" } else { "unload" },
+    ));
+    vec![Effect::PersistSetting {
+        key: "cursor_provider_enabled",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous_effective),
+    }]
+}
+
 /// Mirror the STT language preference into `app.current_ui` and `app.voice_config.language`.
 /// The value may be the client-only `"auto"` sentinel; the voice crate resolves it at connect time.
 /// Called by the commit path AND by [`apply_setting_rollback`].

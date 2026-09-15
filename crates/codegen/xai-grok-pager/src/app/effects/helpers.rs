@@ -836,6 +836,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "cursor_provider_enabled" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("cursor_provider_enabled", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_cursor_provider_enabled(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "simple_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("simple_mode", "Bool", &value));

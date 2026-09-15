@@ -1478,6 +1478,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let away = !app.current_ui.show_timeline_enabled();
             let _ = dispatch(Action::SetTimeline(away), app);
         }
+        "cursor_provider_enabled" => {
+            let _ = dispatch(Action::SetCursorProviderEnabled(true), app);
+        }
         "page_flip_on_send" => {
             let away = !crate::appearance::cache::load_page_flip_on_send();
             let _ = dispatch(Action::SetPageFlipOnSend(away), app);

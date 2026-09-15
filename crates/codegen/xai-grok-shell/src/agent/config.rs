@@ -3288,6 +3288,7 @@ pub(crate) fn resolve_model_list(
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
     let mut resolved: IndexMap<String, ModelEntry> = IndexMap::new();
+    let mut cursor_prefetched = IndexMap::new();
     if cfg.endpoints.has_custom_endpoint() {
         tracing::info!(
             models_base_url = ?cfg.endpoints.models_base_url,
@@ -3300,36 +3301,51 @@ pub(crate) fn resolve_model_list(
         resolved.extend(defaults);
     }
     if let Some(mut prefetched) = prefetched {
-        tracing::debug!(count = prefetched.len(), "loaded prefetched models");
-        let default_cw = DEFAULT_CONTEXT_WINDOW;
-        for (key, entry) in prefetched.iter_mut() {
-            let donor = resolved.get(key);
-            if let Some(donor) = donor {
-                if entry.info.context_window.get() == default_cw
-                    && donor.info.context_window.get() != default_cw
-                {
-                    tracing::debug!(
-                        model_key = %key,
-                        model = %entry.info.model,
-                        client_default = default_cw,
-                        inherited = donor.info.context_window.get(),
-                        donor_model = %donor.info.model,
-                        "prefetched model missing context_window, inheriting from hardcoded default"
-                    );
-                    entry.info.context_window = donor.info.context_window;
-                }
-                if entry.info.agent_type == DEFAULT_AGENT_TYPE {
-                    entry.info.agent_type.clone_from(&donor.info.agent_type);
-                }
-                if entry.info.api_backend == ApiBackend::default() {
-                    entry.info.api_backend.clone_from(&donor.info.api_backend);
-                }
-            }
-            if resolved.contains_key(key) {
-                tracing::debug!(model_key = %key, "prefetched model overriding default");
+        let cursor_keys: Vec<String> = prefetched
+            .iter()
+            .filter(|(_, entry)| entry.info.api_backend == ApiBackend::Cursor)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in cursor_keys {
+            if let Some(entry) = prefetched.shift_remove(&key) {
+                cursor_prefetched.insert(key, entry);
             }
         }
-        resolved = prefetched;
+        tracing::debug!(count = prefetched.len(), "loaded prefetched models");
+        if !prefetched.is_empty() || cursor_prefetched.is_empty() {
+            let default_cw = DEFAULT_CONTEXT_WINDOW;
+            for (key, entry) in prefetched.iter_mut() {
+                let donor = resolved.get(key);
+                if let Some(donor) = donor {
+                    if entry.info.context_window.get() == default_cw
+                        && donor.info.context_window.get() != default_cw
+                    {
+                        tracing::debug!(
+                            model_key = %key,
+                            model = %entry.info.model,
+                            client_default = default_cw,
+                            inherited = donor.info.context_window.get(),
+                            donor_model = %donor.info.model,
+                            "prefetched model missing context_window, inheriting from hardcoded default"
+                        );
+                        entry.info.context_window = donor.info.context_window;
+                    }
+                    if entry.info.agent_type == DEFAULT_AGENT_TYPE {
+                        entry.info.agent_type.clone_from(&donor.info.agent_type);
+                    }
+                    if entry.info.api_backend == ApiBackend::default() {
+                        entry.info.api_backend.clone_from(&donor.info.api_backend);
+                    }
+                }
+                if resolved.contains_key(key) {
+                    tracing::debug!(model_key = %key, "prefetched model overriding default");
+                }
+            }
+            resolved = prefetched;
+        }
+    }
+    for (key, entry) in cursor_prefetched {
+        resolved.insert(key, entry);
     }
     let mut explicit_api_backend_keys = std::collections::HashSet::new();
     for (key, model_override) in &cfg.config_models {

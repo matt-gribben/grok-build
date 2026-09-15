@@ -48,7 +48,18 @@ fn prefetch_models_blocking_gated(
     fetch_auth: ModelFetchAuth,
     remote_fetch_enabled: bool,
 ) -> Option<IndexMap<String, ModelEntry>> {
-    fetch_models_uncommitted(endpoints, auth, fetch_auth, remote_fetch_enabled).commit()
+    let mut models = fetch_models_uncommitted(endpoints, auth, fetch_auth, remote_fetch_enabled)
+        .commit()
+        .unwrap_or_default();
+    if super::cursor_catalog::is_cursor_provider_enabled()
+        && let Some(cursor_models) = super::cursor_catalog::fetch_cursor_models(
+            endpoints,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+    {
+        models.extend(cursor_models);
+    }
+    (!models.is_empty()).then_some(models)
 }
 
 /// A models fetch not yet written to the disk cache; the commit point decides

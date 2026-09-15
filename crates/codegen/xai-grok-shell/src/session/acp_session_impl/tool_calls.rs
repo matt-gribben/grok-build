@@ -559,7 +559,10 @@ impl SessionActor {
                     }
                 };
                 self.chat_state_handle
-                    .push_tool_result(ConversationItem::tool_result(call.id.clone(), message));
+                    .push_tool_result(ConversationItem::tool_result_error(
+                        call.id.clone(),
+                        message,
+                    ));
                 continue;
             }
             self.emit_event(crate::session::events::Event::ToolStarted {
@@ -2609,7 +2612,7 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
+        let tool_chat = ConversationItem::tool_result_error(call_id.to_string(), message);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }
@@ -2859,14 +2862,20 @@ impl SessionActor {
             )
             .await
         };
-        let tool_chat = if inline_images.is_empty() {
-            ConversationItem::tool_result(call_id.to_string(), prompt_text)
-        } else {
-            ConversationItem::tool_result_with_images(
+        let tool_error = result.output.is_error();
+        let tool_chat = match (tool_error, inline_images.is_empty()) {
+            (false, true) => ConversationItem::tool_result(call_id.to_string(), prompt_text),
+            (true, true) => ConversationItem::tool_result_error(call_id.to_string(), prompt_text),
+            (false, false) => ConversationItem::tool_result_with_images(
                 call_id.to_string(),
                 prompt_text,
                 inline_images,
-            )
+            ),
+            (true, false) => ConversationItem::tool_result_error_with_images(
+                call_id.to_string(),
+                prompt_text,
+                inline_images,
+            ),
         };
         self.chat_state_handle.push_tool_result(tool_chat);
         let mut deferred_followups = Vec::new();
@@ -3055,7 +3064,7 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
+        let tool_chat = ConversationItem::tool_result_error(call_id.to_string(), message);
         self.chat_state_handle.push_tool_result(tool_chat);
         vec![]
     }
@@ -3093,7 +3102,7 @@ impl SessionActor {
         );
         self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
             .await;
-        let tool_chat = ConversationItem::tool_result(model_call_id.to_owned(), reason);
+        let tool_chat = ConversationItem::tool_result_error(model_call_id.to_owned(), reason);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }

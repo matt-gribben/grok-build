@@ -128,6 +128,7 @@ impl SessionActor {
     /// Relinquish normal stream ownership immediately when cancellation claims a turn.
     /// Retain only work still owned by a timeout from older turns; late events for the cancelled request are otherwise stale.
     pub(crate) fn cancel_active_sampling_requests(&self) {
+        xai_grok_sampler::cancel_cursor_session(self.session_info.id.0.as_ref());
         self.close_stream_apply_span_any();
         self.turn_stream_drained.lock().clear();
         self.pending_image_strip

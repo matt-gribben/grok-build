@@ -6,6 +6,68 @@ use xai_grok_login::backend::{ActiveAuthBackend, AuthBackend};
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
 
+/// Reads the selected Cursor Desktop session on demand. The cached token is
+/// consumed by `current_bearer` and held in zeroizing memory only until the
+/// dedicated Cursor transport copies it into its short-lived request owner.
+#[derive(Default)]
+struct CursorDesktopBearerResolver {
+    token: std::sync::Mutex<Option<zeroize::Zeroizing<String>>>,
+    last_error: std::sync::Mutex<Option<String>>,
+}
+
+impl std::fmt::Debug for CursorDesktopBearerResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CursorDesktopBearerResolver")
+            .field(
+                "token_loaded",
+                &self.token.lock().is_ok_and(|token| token.is_some()),
+            )
+            .finish()
+    }
+}
+
+impl xai_grok_sampler::BearerResolver for CursorDesktopBearerResolver {
+    fn current_bearer(&self) -> Option<String> {
+        self.token
+            .lock()
+            .ok()?
+            .take()
+            .map(|token| token.as_str().to_owned())
+    }
+
+    fn last_error_message(&self) -> Option<String> {
+        self.last_error.lock().ok()?.clone()
+    }
+
+    fn prepare_for_send(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let resolved = tokio::task::spawn_blocking(
+                xai_grok_login::cursor_credentials::resolve_cursor_desktop_access_token,
+            )
+            .await
+            .map_err(|_| {
+                xai_grok_login::cursor_credentials::CursorCredentialError::DatabaseUnavailable
+            })
+            .and_then(|result| result);
+            let (resolved, last_error) = match resolved {
+                Ok(token) => (
+                    Some(zeroize::Zeroizing::new(token.expose_secret().to_owned())),
+                    None,
+                ),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            if let Ok(mut token) = self.token.lock() {
+                *token = resolved;
+            }
+            if let Ok(mut error) = self.last_error.lock() {
+                *error = last_error;
+            }
+        })
+    }
+}
+
 const CLASSIFIER_REQUEST_TOKEN_RESERVE: u64 = 16_384;
 
 fn classifier_request_fits_context(input_tokens: u64, context_window: u64) -> bool {
@@ -649,6 +711,7 @@ impl SessionActor {
                 stream_tool_calls: None,
             });
         let creds = self.chat_state_handle.get_credentials().await;
+        let is_cursor_backend = cfg.api_backend == xai_grok_sampler::ApiBackend::Cursor;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
         // Gate on the stable session classifier, not `creds.auth_type`; see `crate::agent::auth_method::session_token_auth_gate`
         // `cfg.base_url` keeps an `Unknown` BYOK status refreshable against first-party xAI hosts
@@ -712,23 +775,55 @@ impl SessionActor {
             &cfg.base_url,
         );
         SamplingConfig {
-            api_key,
-            base_url: cfg.base_url,
-            mtls_cert_dir: cfg.mtls_cert_dir,
+            api_key: if is_cursor_backend { None } else { api_key },
+            base_url: if is_cursor_backend {
+                String::new()
+            } else {
+                cfg.base_url
+            },
+            mtls_cert_dir: if is_cursor_backend {
+                None
+            } else {
+                cfg.mtls_cert_dir
+            },
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
-            temperature: cfg.temperature,
-            top_p: cfg.top_p,
+            temperature: if is_cursor_backend {
+                None
+            } else {
+                cfg.temperature
+            },
+            top_p: if is_cursor_backend { None } else { cfg.top_p },
             api_backend: cfg.api_backend,
-            auth_scheme,
-            extra_headers,
+            auth_scheme: if is_cursor_backend {
+                xai_grok_sampler::AuthScheme::Bearer
+            } else {
+                auth_scheme
+            },
+            extra_headers: if is_cursor_backend {
+                Default::default()
+            } else {
+                extra_headers
+            },
             conversation_group_id: cfg.conversation_group_id,
             extra_response_includes,
-            query_params: cfg.query_params.clone(),
-            env_http_headers: cfg.env_http_headers.clone(),
+            query_params: if is_cursor_backend {
+                Default::default()
+            } else {
+                cfg.query_params.clone()
+            },
+            env_http_headers: if is_cursor_backend {
+                Default::default()
+            } else {
+                cfg.env_http_headers.clone()
+            },
             context_window: cfg.context_window.get(),
             client_version: creds.client_version,
-            reasoning_effort: cfg.reasoning_effort,
+            reasoning_effort: if is_cursor_backend {
+                None
+            } else {
+                cfg.reasoning_effort
+            },
             force_http1: false,
             max_retries: cfg.max_retries.or(Some(self.max_retries)),
             rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
@@ -750,7 +845,9 @@ impl SessionActor {
             attribution_callback: self.attribution_callback.clone(),
             // Per-request bearer override is only valid for session-token auth.
             // Explicit API-key/env-key models must keep their configured bearer and must not be overwritten by the interactive session token
-            bearer_resolver: if use_bearer_resolver {
+            bearer_resolver: if is_cursor_backend {
+                Some(std::sync::Arc::new(CursorDesktopBearerResolver::default()))
+            } else if use_bearer_resolver {
                 self.auth_manager.as_ref().map(|am| {
                     xai_grok_login::credential_provider::WireValidBearerResolver::shared(am.clone())
                 })
@@ -1305,12 +1402,18 @@ impl SessionActor {
         // Auth-401 recovery only applies to refreshable session-token auth (the stable gate, not `creds.auth_type`).
         // A static api-key isn't refreshable, so retrying re-sends the same rejected bearer and 401-loops the turn See `crate::agent::auth_method::session_token_auth_gate`.
         // One sampling-config snapshot drives every arm-4 decision, so the provider resolution and the gate can't disagree mid-model-switch.
-        let (failed_model_id, failed_base_url) = self
+        let (failed_model_id, failed_base_url, failed_backend) = self
             .chat_state_handle
             .get_sampling_config()
             .await
-            .map(|c| (c.model, c.base_url))
-            .unwrap_or_default();
+            .map(|c| (c.model, c.base_url, c.api_backend))
+            .unwrap_or_else(|| {
+                (
+                    String::new(),
+                    String::new(),
+                    xai_grok_sampler::ApiBackend::default(),
+                )
+            });
 
         // Provider-backed models recover via arm 4c below
         // The provider is resolved before the eligibility check so its warnings stay quiet for a 401 that 4c handles
@@ -1428,7 +1531,10 @@ impl SessionActor {
 
         // 4d. Bounded resubmit, after the auth arms, before the terminal paths.
         //     Budgeted workflow children stay terminal (guards above)
-        if transient_retry_eligible(&error) && transient.enabled {
+        if failed_backend != xai_grok_sampler::ApiBackend::Cursor
+            && transient_retry_eligible(&error)
+            && transient.enabled
+        {
             if transient.budget_remaining() {
                 // Count intercepted attempts; section 5 sees only the final one.
                 if matches!(error.kind, SamplingErrorKind::IdleTimeout) {

@@ -67,17 +67,30 @@ default = "grok-4.5"
 
 ## Supported API Backends
 
-Grok supports three API backends. Set `api_backend` in your `[model.*]` config to choose which protocol the model uses:
+Grok supports four API backends. Set `api_backend` in your `[model.*]` config to choose which protocol the model uses:
 
 | Value | API | Default |
 |-------|-----|---------|
 | `"chat_completions"` | OpenAI Chat Completions (`/v1/chat/completions`) | Yes |
 | `"responses"` | OpenAI Responses (`/v1/responses`) | |
 | `"messages"` | Anthropic Messages (`/v1/messages`) | |
+| `"cursor"` | Cursor subscription inference over Cursor's AgentService stream | |
 
 When you omit `api_backend`, Grok uses `chat_completions`.
 
-To send provider-specific authentication or version headers -- for example, Anthropic's `x-api-key` -- use the `extra_headers` field described below. Grok sends those headers verbatim with every request to the endpoint.
+For HTTP API backends, provider-specific authentication or version headers -- for example, Anthropic's `x-api-key` -- can be set with the `extra_headers` field described below. The Cursor backend uses its dedicated Cursor transport and does not send configurable provider headers.
+
+### Use a Cursor subscription
+
+This integration is experimental and uses Cursor's private, reverse-engineered inference protocol. Same-stream tool-result continuation is implemented, but its full end-to-end interaction with Grok's permission flow is still being validated. A lost Cursor stream cannot yet be recovered from a checkpoint.
+
+The Cursor backend uses the signed-in Cursor Desktop session already stored on this machine. It does not start browser sign-in or require a copied API key. In Grok Build, open **Settings → Models → Cursor subscription models**, turn it on, and restart Grok Build. Then select a discovered `cursor/<model-id>` entry with `/model` or `-m`. The model list reflects the models available to the current Cursor account. Cursor's local access token is read from the Desktop session database only when this backend is enabled, and is not saved in Grok configuration.
+
+Source builds use `~/.grok-build` for their configuration, sessions, and caches by default, keeping them separate from an installed Grok app's `~/.grok` profile. An explicit `GROK_HOME` overrides that location.
+
+Grok continues to execute its own tools and permission checks. Cursor-native shell, file, web, and computer-use tools are disabled. The adapter maps each tool result, including permission denials, onto the paused Cursor inference stream; end-to-end permission validation remains in progress.
+
+This adapter uses Cursor's private inference protocol, which Cursor may change. Cursor ignores ordinary system-role messages on this path, so Grok sends caller instructions in a user-role `<rules>` message; Cursor's own agent instructions retain higher priority. Temperature, top-p, image input, structured output, hosted search, and forced tool choice are not supported. The configured output-token limit is enforced by Grok locally; Cursor does not receive it as an upstream limit. Model context limits may be estimated.
 
 ---
 

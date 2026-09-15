@@ -502,6 +502,11 @@ impl SamplingClient {
     /// Uses an identity-specific client for configured mTLS; otherwise grabs the process-wide shared client.
     /// This does not perform any network I/O.
     pub fn new(config: SamplerConfig) -> Result<Self> {
+        if config.api_backend == ApiBackend::Cursor {
+            return Err(SamplingError::InvalidConfiguration(
+                "Cursor uses its dedicated signed-in-session transport",
+            ));
+        }
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(ref api_key) = config.api_key {
@@ -2114,6 +2119,11 @@ impl SamplingClient {
                 let (raw, meta) = self.conversation_stream_messages(request).await?;
                 let events = crate::stream::stream_messages(raw, meta, request_id, idle_timeout);
                 crate::stream::collect_response(events).await
+            }
+            ApiBackend::Cursor => {
+                return Err(SamplingError::InvalidConfiguration(
+                    "Cursor requires the actor-managed bidirectional Run stream",
+                ));
             }
         };
         let response = result

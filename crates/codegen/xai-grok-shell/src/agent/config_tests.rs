@@ -7880,6 +7880,22 @@ fn resolve_model_list_prefetch_replaces_bundled_entirely() {
     assert!(resolved.contains_key("other-model"));
     assert!(!resolved.contains_key(dm));
 }
+
+#[test]
+fn resolve_model_list_adds_cursor_catalog_without_replacing_bundled_models() {
+    let cfg = Config::default();
+    let default_model = crate::models::default_model();
+    let mut cursor = prefetch_model_entry("claude-4.6-sonnet", 200_000, ApiBackend::Cursor);
+    cursor.info.id = Some("cursor/claude-4.6-sonnet".to_owned());
+    cursor.info.model_family = Some("cursor".to_owned());
+    let prefetched = IndexMap::from([("cursor/claude-4.6-sonnet".to_owned(), cursor)]);
+
+    let resolved = resolve_model_list(&cfg, Some(prefetched));
+
+    assert!(resolved.contains_key(default_model));
+    assert!(resolved.contains_key("cursor/claude-4.6-sonnet"));
+}
+
 #[test]
 fn resolve_model_list_empty_prefetch_yields_empty_base() {
     let cfg = Config::default();

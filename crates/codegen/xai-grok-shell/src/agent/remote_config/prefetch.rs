@@ -99,23 +99,49 @@ fn models_prefetch_inputs(
         return None;
     }
     let remote = crate::util::config::resolve_remote_fetch_enabled();
+    let cursor_enabled = super::cursor_catalog::is_cursor_provider_enabled();
+    if !remote && !cursor_enabled {
+        tracing::info!("startup model/settings prefetch skipped: no remote or Cursor provider");
+        return None;
+    }
     // Prefer the live in-memory session so a just-refreshed or just-logged-in
     // credential drives the catalog fetch, not a stale or absent disk token.
-    let auth = warmed_auth.or_else(|| resolve_disk_auth(grok_com_config.clone()));
+    let auth = if remote {
+        warmed_auth.or_else(|| resolve_disk_auth(grok_com_config.clone()))
+    } else {
+        None
+    };
     let endpoints = resolve_startup_endpoints();
-    let env = resolve_prefetch_inputs_from_parts(auth.clone(), endpoints, remote)?;
-    let expected = ModelsCacheScope::resolve(&env.endpoints, env.model_fetch_auth, auth.as_ref());
+    let remote_env = remote
+        .then(|| resolve_prefetch_inputs_from_parts(auth.clone(), endpoints.clone(), true))
+        .flatten();
+    let remote_fetch_enabled = remote_env.is_some();
+    let env = match remote_env {
+        Some(env) => env,
+        None if cursor_enabled => PrefetchInputs {
+            auth: None,
+            endpoints: endpoints.clone(),
+            model_fetch_auth: ModelFetchAuth::Session,
+        },
+        None => return None,
+    };
+    let expected = remote_fetch_enabled
+        .then(|| ModelsCacheScope::resolve(&env.endpoints, env.model_fetch_auth, auth.as_ref()));
     Some(ModelsPrefetchPlan {
         env,
         expected,
         commit_config: grok_com_config,
+        remote_fetch_enabled,
+        cursor_enabled,
     })
 }
 
 struct ModelsPrefetchPlan {
     env: PrefetchInputs,
-    expected: ModelsCacheScope,
+    expected: Option<ModelsCacheScope>,
     commit_config: Option<GrokComConfig>,
+    remote_fetch_enabled: bool,
+    cursor_enabled: bool,
 }
 
 /// Fetch the catalog and commit it under the policy/identity gate. The commit is
@@ -131,35 +157,58 @@ fn run_models_prefetch(
         env,
         expected,
         commit_config,
+        remote_fetch_enabled,
+        cursor_enabled,
     } = plan;
-    match fetch_models_uncommitted(
-        &env.endpoints,
-        env.auth.as_ref(),
-        env.model_fetch_auth,
-        true,
-    ) {
-        ModelsPrefetch::Cached(models) => Some(models),
-        ModelsPrefetch::Fetched(write) => {
-            // Re-resolve the live scope under the fetch-time mode (stable origin) but with live disk
-            // auth for identity, so an alpha flip, key rotation, or account switch is caught without
-            // abandoning the catalog when disk auth is briefly absent.
-            let live = ModelsCacheScope::resolve_live(env.model_fetch_auth, commit_config.as_ref());
-            match evaluate_models_commit(&expected, &live) {
-                Commit::CacheAndServe => Some(write.commit()),
-                Commit::ServeInMemory => {
-                    tracing::info!(
-                        "models fetch served in memory; not cached until the session persists"
-                    );
-                    Some(write.into_models())
-                }
-                Commit::Retry | Commit::Abandon => {
-                    tracing::info!("models load discarded fetch: policy or origin changed");
-                    None
+    let mut models = if remote_fetch_enabled {
+        match fetch_models_uncommitted(
+            &env.endpoints,
+            env.auth.as_ref(),
+            env.model_fetch_auth,
+            true,
+        ) {
+            ModelsPrefetch::Cached(models) => Some(models),
+            ModelsPrefetch::Fetched(write) => {
+                // Re-resolve the live scope under the fetch-time mode (stable origin) but with live disk
+                // auth for identity, so an alpha flip, key rotation, or account switch is caught without
+                // abandoning the catalog when disk auth is briefly absent.
+                let live =
+                    ModelsCacheScope::resolve_live(env.model_fetch_auth, commit_config.as_ref());
+                match expected
+                    .as_ref()
+                    .map(|expected| evaluate_models_commit(expected, &live))
+                {
+                    Some(Commit::CacheAndServe) => Some(write.commit()),
+                    Some(Commit::ServeInMemory) => {
+                        tracing::info!(
+                            "models fetch served in memory; not cached until the session persists"
+                        );
+                        Some(write.into_models())
+                    }
+                    Some(Commit::Retry | Commit::Abandon) | None => {
+                        tracing::info!("models load discarded fetch: policy or origin changed");
+                        None
+                    }
                 }
             }
+            ModelsPrefetch::Unavailable => None,
         }
-        ModelsPrefetch::Unavailable => None,
+    } else {
+        None
+    };
+    if cancel.is_cancelled() {
+        return None;
     }
+    if cursor_enabled
+        && let Some(cursor_models) =
+            super::cursor_catalog::fetch_cursor_models(&env.endpoints, cancel)
+    {
+        let catalog = models.get_or_insert_with(IndexMap::new);
+        for (key, model) in cursor_models {
+            catalog.insert(key, model);
+        }
+    }
+    models.filter(|models| !models.is_empty())
 }
 
 /// Run one catalog prefetch on its own OS thread, delivering the result through

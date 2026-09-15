@@ -42,6 +42,10 @@ pub struct UiConfig {
     /// `None` means off (client default; opt-in). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_timeline: Option<bool>,
+    /// Enable model discovery through the signed-in Cursor Desktop session.
+    /// Written by Grok Build's Models settings; requires an app restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_provider_enabled: Option<bool>,
     /// Snap a just-sent prompt to the viewport top. `None` means on (default).
     /// Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -257,6 +261,7 @@ impl Default for UiConfig {
             default_selected_permission: None,
             show_timestamps: None,
             show_timeline: None,
+            cursor_provider_enabled: None,
             page_flip_on_send: None,
             confirm_before_rewind: None,
             auto_dark_theme: None,

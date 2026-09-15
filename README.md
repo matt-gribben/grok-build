@@ -79,8 +79,13 @@ cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
 The binary artifact is named `xai-grok-pager`; official installs ship it as
-`grok`. On first launch it opens your browser to authenticate — see the
-[authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+`grok`. On first launch it may open your browser to authenticate to Grok — see
+the [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+That is separate from Cursor: the experimental Cursor provider uses the
+existing signed-in Cursor Desktop session and does not start Cursor browser
+authentication. Source builds keep their config, sessions, and caches in
+`~/.grok-build` by default, separate from an installed Grok app's `~/.grok`.
+Set `GROK_HOME` only when you intentionally want to use a different profile.
 
 ## Documentation
 

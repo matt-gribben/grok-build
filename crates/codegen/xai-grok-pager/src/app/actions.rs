@@ -532,6 +532,9 @@ pub enum Action {
     /// The dispatcher switches the active session and persists via `Effect::PersistSetting`.
     /// Does not carry effort; use `Action::SwitchModel` for that.
     SetDefaultModel(acp::ModelId),
+    /// Enable or disable local Cursor subscription model discovery.
+    /// Restart-required: the account catalog is fetched during startup.
+    SetCursorProviderEnabled(bool),
     /// Clear the persisted default model (`cfg.models.default = None`).
     /// Active session's model is unchanged; next session resolves via the shell's default-resolution chain.
     ClearDefaultModel,

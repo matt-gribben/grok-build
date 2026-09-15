@@ -90,6 +90,11 @@ pub async fn set_show_timeline(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.show_timeline = Some(value)).await
 }
 
+/// Persist whether account-specific models from the local Cursor Desktop session are enabled.
+pub async fn set_cursor_provider_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.cursor_provider_enabled = Some(value)).await
+}
+
 pub async fn set_page_flip_on_send(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.page_flip_on_send = Some(value)).await
 }

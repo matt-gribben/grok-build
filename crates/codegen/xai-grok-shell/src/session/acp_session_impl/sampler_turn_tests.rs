@@ -1,8 +1,9 @@
 use xai_grok_sampling_types::{SearchDateBound, ToolOverrides, WebSearchOptions, XSearchOptions};
 
 use super::{
-    CLASSIFIER_REQUEST_TOKEN_RESERVE, LengthSalvageAction, LengthSalvageStreak,
-    MAX_OUTPUT_TOKEN_LIMIT_RETRIES, classifier_request_fits_context, resolve_configured_cutoff,
+    CLASSIFIER_REQUEST_TOKEN_RESERVE, CursorDesktopBearerResolver, LengthSalvageAction,
+    LengthSalvageStreak, MAX_OUTPUT_TOKEN_LIMIT_RETRIES, classifier_request_fits_context,
+    resolve_configured_cutoff,
 };
 
 fn x_cut(to: &str) -> XSearchOptions {
@@ -96,6 +97,105 @@ fn non_empty_base_cutoff_wins_per_tool_and_an_empty_one_reverts_to_the_seed() {
     let got = resolve_configured_cutoff(Some(seed.clone()), Some(&base));
     assert_eq!(got.x_search, Some(x_cut("2019-06-01")));
     assert_eq!(got.web_search, seed.web_search);
+}
+
+/// Explicit live acceptance path for the active Cursor Desktop session.
+/// This reads the local access token only when invoked with `--ignored`, sends
+/// one short prompt through Cursor's Run stream, and never logs the credential.
+#[tokio::test]
+#[ignore = "contacts Cursor inference using the signed-in Desktop session"]
+async fn live_cursor_subscription_smoke_uses_stored_desktop_session() {
+    use std::time::{Duration, Instant};
+
+    use tokio_util::sync::CancellationToken;
+    use xai_grok_login::cursor_credentials::resolve_cursor_desktop_access_token;
+    use xai_grok_sampler::{
+        ApiBackend, RetryPolicy, SamplerActor, SamplerConfig, cursor_catalog::CursorCatalogClient,
+        cursor_request::CursorModelRoute,
+    };
+    use xai_grok_sampling_types::conversation::UserItem;
+    use xai_grok_sampling_types::{ContentPart, ConversationItem, ConversationRequest};
+
+    let credential = resolve_cursor_desktop_access_token()
+        .expect("a signed-in Cursor Desktop access token is available");
+    let catalog = CursorCatalogClient::new()
+        .expect("Cursor's configured regional endpoint is trusted")
+        .discover_models(credential.expose_secret(), &CancellationToken::new())
+        .await
+        .expect("Cursor returns a usable account model catalog");
+    let selected = catalog
+        .models
+        .iter()
+        .find(|model| model.id.to_ascii_lowercase().contains("composer-2"))
+        .or_else(|| {
+            catalog
+                .models
+                .iter()
+                .find(|model| !model.id.to_ascii_lowercase().contains("auto"))
+        })
+        .or_else(|| catalog.models.first())
+        .expect("Cursor's account catalog includes a usable model");
+    let variant = selected
+        .variants
+        .iter()
+        .find(|variant| variant.is_default_non_max_config == Some(true))
+        .or_else(|| {
+            selected
+                .variants
+                .iter()
+                .find(|variant| !variant.is_max_mode)
+        });
+    let route = CursorModelRoute {
+        model_id: selected.id.clone(),
+        parameters: variant.map_or_else(Vec::new, |variant| variant.parameters.clone()),
+        max_mode: false,
+    }
+    .to_model_string();
+    let config = SamplerConfig {
+        model: route.clone(),
+        api_backend: ApiBackend::Cursor,
+        max_completion_tokens: Some(24),
+        max_retries: Some(0),
+        bearer_resolver: Some(std::sync::Arc::new(CursorDesktopBearerResolver::default())),
+        ..SamplerConfig::default()
+    };
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let sampler = SamplerActor::spawn(config, RetryPolicy::default(), event_tx);
+    let request = ConversationRequest {
+        items: vec![ConversationItem::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: "Reply with only the word OK. Do not call tools.".into(),
+            }],
+            ..UserItem::default()
+        })],
+        model: Some(route),
+        max_output_tokens: Some(24),
+        x_grok_session_id: Some(uuid::Uuid::new_v4().to_string()),
+        ..ConversationRequest::default()
+    };
+
+    let started = Instant::now();
+    let collected = tokio::time::timeout(
+        Duration::from_secs(90),
+        sampler.submit_and_collect(xai_grok_sampler::RequestId::random(), request),
+    )
+    .await
+    .expect("Cursor inference completes within 90 seconds");
+    let (response, _) = collected.unwrap_or_else(|_| {
+        panic!("Cursor inference failed; provider error details are intentionally suppressed")
+    });
+    let assistant = response
+        .assistant()
+        .expect("Cursor returns an assistant response");
+    assert!(
+        !assistant.content.trim().is_empty(),
+        "Cursor returns non-empty text"
+    );
+    eprintln!(
+        "Cursor live smoke passed: model={}, elapsed_ms={}",
+        selected.id,
+        started.elapsed().as_millis()
+    );
 }
 
 #[test]

@@ -151,6 +151,11 @@ impl Default for SamplerConfig {
 pub trait BearerResolver: Send + Sync + std::fmt::Debug {
     fn current_bearer(&self) -> Option<String>;
 
+    /// Sanitized last failure to resolve a local credential, when available.
+    fn last_error_message(&self) -> Option<String> {
+        None
+    }
+
     /// Awaited by the client right before it stamps a request; [`Self::current_bearer`] is read afterwards.
     /// A resolver that can renew its bearer does so here when the cached one would not survive the send, so the request never leaves with no credential.
     /// Default: no-op.

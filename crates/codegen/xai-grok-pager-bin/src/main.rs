@@ -1969,7 +1969,31 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+
+/// Development builds use an isolated profile so their config, sessions, and caches cannot
+/// interfere with an installed Grok build. Packaged builds retain the normal `~/.grok` profile.
+#[cfg(not(feature = "release-dist"))]
+fn local_build_grok_home(default_home: &std::path::Path) -> std::path::PathBuf {
+    default_home.with_file_name(".grok-build")
+}
+
+#[cfg(not(feature = "release-dist"))]
+fn configure_local_build_home() {
+    if std::env::var_os("GROK_HOME").is_some_and(|path| !path.is_empty()) {
+        return;
+    }
+    let home = local_build_grok_home(&xai_grok_config::default_grok_home());
+    // Set before any Grok config/session/cache path is resolved. Rust 2024 marks process-env
+    // mutation unsafe because it cannot be synchronized with foreign threads; this occurs first
+    // in main, before spawning workers.
+    unsafe { std::env::set_var("GROK_HOME", home) };
+}
+
+#[cfg(feature = "release-dist")]
+fn configure_local_build_home() {}
+
 fn main() {
+    configure_local_build_home();
     xai_grok_version::set_full_version(env!("VERSION_WITH_COMMIT"));
     xai_grok_telemetry::startup::mark_process_start();
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
@@ -2719,6 +2743,15 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "release-dist"))]
+    #[test]
+    fn local_build_profile_is_separate_from_the_installed_profile() {
+        assert_eq!(
+            local_build_grok_home(std::path::Path::new("/Users/test/.grok")),
+            std::path::PathBuf::from("/Users/test/.grok-build")
+        );
+    }
+
     #[test]
     fn embedded_agent_commands_heal_managed_policy_before_sandboxing() {
         for args in [
