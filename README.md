@@ -51,6 +51,27 @@ grok --version
 See the [changelog](https://x.ai/build/changelog) for the latest fixes,
 features, and improvements in each release.
 
+### Fork builds (matt-gribben/grok-build)
+
+This fork publishes GitHub Release binaries for macOS Apple Silicon, macOS
+Intel, and Linux x86_64. They install into `~/.grok-build` and do not replace
+an official `~/.grok` install.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/matt-gribben/grok-build/main/scripts/install-fork.sh | bash
+export PATH="$HOME/.grok-build/bin:$PATH"
+grok --version
+```
+
+Pin a tag with `VERSION=v1.0.24` (or `VERSION=nightly`) in the environment.
+GitHub Actions builds on every `main` push (the `nightly` prerelease) and on
+`v*` tags. Manual runs are available from the Actions tab. After a macOS
+download, Gatekeeper may require:
+
+```sh
+xattr -d com.apple.quarantine ~/.grok-build/bin/grok
+```
+
 ## Building from source
 
 Requirements:
