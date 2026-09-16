@@ -36,7 +36,7 @@ fn suggests_unique_registered_path_for_wrong_root() {
 }
 
 #[test]
-fn suggests_nothing_for_ambiguous_disabled_non_skill_or_exact_requests() {
+fn suggests_nothing_for_ambiguous_disabled_or_exact_requests() {
     let mut retired = skill("retired", "/home/user/.grok/skills/retired/SKILL.md");
     retired.enabled = false;
     let manager = seeded_manager(vec![
@@ -58,8 +58,6 @@ fn suggests_nothing_for_ambiguous_disabled_non_skill_or_exact_requests() {
         "/wrong/root/review/SKILL.md",
         // Disabled skill.
         "/wrong/root/retired/SKILL.md",
-        // Not a SKILL.md read.
-        "/wrong/root/solo/README.md",
         // The read already targeted the registered path.
         "/home/user/.grok/skills/solo/SKILL.md",
     ] {
@@ -68,6 +66,74 @@ fn suggests_nothing_for_ambiguous_disabled_non_skill_or_exact_requests() {
             "{requested}"
         );
     }
+}
+
+#[test]
+fn suggests_companion_files_under_a_skill_directory_not_just_skill_md() {
+    // A wrong-root guess for a file *inside* a skill's directory (persona, script, doc) should
+    // redirect the same way a wrong-root `SKILL.md` guess does — the model mis-roots both kinds
+    // of read identically.
+    let manager = seeded_manager(vec![skill(
+        "implement",
+        "/home/user/.claude/skills/implement/SKILL.md",
+    )]);
+
+    let suggestion = manager
+        .suggest_skill_path(Path::new(
+            "/wrong/root/skills/implement/personas/reviewer.md",
+        ))
+        .unwrap();
+
+    assert_eq!(
+        suggestion.display_path,
+        Path::new("/home/user/.claude/skills/implement/personas/reviewer.md")
+    );
+}
+
+#[test]
+fn companion_file_match_skips_a_shallower_non_skill_ancestor() {
+    // "skills" is not itself a registered skill name, so the search must keep walking outward
+    // past it and match on "implement" further up, not stop early or misfire on it.
+    let manager = seeded_manager(vec![skill(
+        "implement",
+        "/home/user/.claude/skills/implement/SKILL.md",
+    )]);
+
+    assert!(
+        manager
+            .suggest_skill_path(Path::new("/wrong/root/skills/implement/scripts/host.py"))
+            .is_some()
+    );
+}
+
+#[test]
+fn companion_file_under_an_ambiguous_skill_name_suggests_nothing() {
+    let manager = seeded_manager(vec![
+        skill("review", "/repo/.grok/skills/review/SKILL.md"),
+        skill("review", "/home/user/.grok/skills/review/SKILL.md"),
+    ]);
+
+    assert!(
+        manager
+            .suggest_skill_path(Path::new("/wrong/root/review/personas/reviewer.md"))
+            .is_none()
+    );
+}
+
+#[test]
+fn companion_file_already_at_the_registered_path_suggests_nothing() {
+    let manager = seeded_manager(vec![skill(
+        "implement",
+        "/home/user/.claude/skills/implement/SKILL.md",
+    )]);
+
+    assert!(
+        manager
+            .suggest_skill_path(Path::new(
+                "/home/user/.claude/skills/implement/personas/reviewer.md"
+            ))
+            .is_none()
+    );
 }
 
 #[test]
