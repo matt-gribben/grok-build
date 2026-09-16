@@ -20,7 +20,7 @@ enum State {
 }
 
 pub(crate) struct SummaryConfig {
-    pub(crate) sampling_client: OaiCompatClient,
+    pub(crate) sampling_client: Option<OaiCompatClient>,
     pub(crate) model: String,
     /// Channel back to the persistence actor for sequential storage writes.
     /// Weak: a strong sender here would keep the actor's own channel and task alive.
@@ -63,8 +63,12 @@ impl SummaryGenerator {
 
                 // A background task runs the LLM call so the persistence actor keeps processing messages (updates, flushes)
                 tokio::spawn(async move {
-                    let mut title =
-                        generate_session_summary(content.clone(), sampling_client, &model).await;
+                    let mut title = match sampling_client {
+                        Some(sampling_client) => {
+                            generate_session_summary(content.clone(), sampling_client, &model).await
+                        }
+                        None => String::new(),
+                    };
                     if title.trim().is_empty() {
                         title =
                             crate::session::helpers::session_summary::title_fallback_from_user_text(
@@ -217,7 +221,7 @@ mod tests {
         let sampling_client =
             OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap();
         let mut generator = SummaryGenerator::new(SummaryConfig {
-            sampling_client,
+            sampling_client: Some(sampling_client),
             model: String::new(),
             persistence_tx: tx.downgrade(),
         });
@@ -228,5 +232,23 @@ mod tests {
         assert!(generator.is_idle());
         generator.reset();
         assert!(generator.is_idle());
+    }
+
+    #[tokio::test]
+    async fn missing_sampling_client_uses_local_title_fallback() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut generator = SummaryGenerator::new(SummaryConfig {
+            sampling_client: None,
+            model: "cursor/test-model".to_owned(),
+            persistence_tx: tx.downgrade(),
+        });
+
+        generator.update("fix workflow Cursor spawning".into());
+
+        let message = rx.recv().await.expect("generated title");
+        let PersistenceMsg::GeneratedTitle(title) = message else {
+            panic!("expected generated title");
+        };
+        assert_eq!(title, "fix workflow Cursor spawning");
     }
 }

@@ -312,6 +312,18 @@ pub(super) fn task_model_override_error(
     let requested = requested?;
     crate::agent::remote_config::task_model_error_for_catalog(requested, available, is_session_auth)
 }
+
+pub(super) fn persistence_sampling_client(
+    config: &xai_grok_sampler::SamplerConfig,
+) -> Result<Option<crate::sampling::Client>, crate::sampling::SamplingError> {
+    // Cursor child inference is built later by SamplerActor; persistence only needs this client for title generation.
+    if config.api_backend == crate::sampling::ApiBackend::Cursor {
+        Ok(None)
+    } else {
+        crate::sampling::Client::new(config.clone()).map(Some)
+    }
+}
+
 #[tracing::instrument(
     name = "subagent.handle_request",
     skip_all,
@@ -1046,8 +1058,8 @@ pub(crate) async fn run_shell_child(
             completion_data,
         );
     }
-    let sampling_client = match crate::sampling::Client::new(effective_sampling_config.clone()) {
-        Ok(c) => c,
+    let sampling_client = match persistence_sampling_client(&effective_sampling_config) {
+        Ok(client) => client,
         Err(e) => {
             let msg = format!("Sampling client error: {e}");
             return setup_failure_output(

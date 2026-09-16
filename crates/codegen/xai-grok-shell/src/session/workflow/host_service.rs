@@ -1136,6 +1136,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_host_forwards_cursor_model_to_spawned_subagent() {
+        let run_id = "wf_cursor_model".to_string();
+        let mut tracker = WorkflowTracker::default();
+        tracker.start_run(
+            run_id.clone(),
+            "demo".into(),
+            "objective".into(),
+            vec![],
+            Some(1000),
+            None,
+        );
+        let tracker = Arc::new(parking_lot::Mutex::new(tracker));
+        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
+        let (params, _persist_rx) =
+            test_host_params(&run_id, 1, "wf-scratch-cursor-model", tracker, subagent_tx);
+        let cancel = params.cancel.clone();
+        let (host_tx, host_rx) = mpsc::unbounded_channel();
+        let (handle, _drained) = spawn_workflow_host_service(params, host_rx);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        host_tx
+            .send(WorkflowHostRequest::SpawnAgent {
+                opts: AgentOpts {
+                    prompt: "use Cursor".to_owned(),
+                    model: Some("cursor/claude-sonnet".to_owned()),
+                    ..Default::default()
+                },
+                reply: reply_tx,
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), subagent_rx.recv())
+            .await
+            .expect("workflow spawn reaches coordinator")
+            .expect("subagent channel open");
+        let SubagentEvent::Spawn(spawn) = event else {
+            panic!("expected a spawn event");
+        };
+        assert_eq!(
+            spawn.request.runtime_overrides.model.as_deref(),
+            Some("cursor/claude-sonnet")
+        );
+        assert!(spawn.request.owner.is_workflow());
+        spawn
+            .respond_with(|request| {
+                xai_grok_tools::implementations::grok_build::task::types::SubagentResult {
+                    success: true,
+                    output: Arc::from("done"),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                }
+            })
+            .expect("agent result delivered");
+        assert!(reply_rx.await.unwrap().unwrap().success);
+
+        drop(host_tx);
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
     async fn a_run_keeps_at_most_max_concurrent_agents_live() {
         let run_id = "wf_agent_slots".to_string();
         let mut tracker = WorkflowTracker::default();

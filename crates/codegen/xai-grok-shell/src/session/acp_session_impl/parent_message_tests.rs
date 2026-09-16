@@ -760,7 +760,7 @@ async fn delivered_message_is_durable_in_updates_and_chat_history_before_shutdow
             &info,
             session_dir.path().to_path_buf(),
             acp::ModelId::new("test-model"),
-            sampling_client,
+            Some(sampling_client),
             "test-model".to_owned(),
             crate::session::persistence::ExplicitSessionOpen::New {
                 identity: None,

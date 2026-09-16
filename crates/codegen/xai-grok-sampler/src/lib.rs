@@ -33,6 +33,8 @@ mod shared_http;
 mod span_timing;
 pub mod stream;
 mod stream_classify;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod types;
 
 // Public re-exports: the API consumers see

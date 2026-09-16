@@ -16,8 +16,8 @@ use super::attempt_runner::{
 use super::handle_request::{
     CHILD_ACTOR_ACK_TIMEOUT, PARENT_ACK_TIMEOUT, agent_memory_scope_for_mode,
     child_actor_query, mark_child_usage_not_applied_with_fallback,
-    reparent_surviving_child_tasks, resolve_child_model, take_child_streaming_partial,
-    take_child_turn_messages,
+    persistence_sampling_client, reparent_surviving_child_tasks, resolve_child_model,
+    take_child_streaming_partial, take_child_turn_messages,
 };
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway_with_receiver};
 use xai_grok_subagent_resolution::resolve_effective_overrides;
@@ -2718,6 +2718,27 @@ fn test_sampling_config(model_slug: &str) -> xai_grok_sampling_types::SamplingCo
         reasoning_effort: None,
         stream_tool_calls: None,
     }
+}
+
+#[test]
+fn workflow_cursor_spawn_does_not_construct_generic_sampling_client() {
+    let cursor = xai_grok_sampler::SamplerConfig {
+        api_backend: crate::sampling::ApiBackend::Cursor,
+        model: "cursor/test-model".to_owned(),
+        ..Default::default()
+    };
+    assert!(
+        persistence_sampling_client(&cursor)
+            .expect("Cursor persistence setup is valid")
+            .is_none()
+    );
+
+    let generic = xai_grok_sampler::SamplerConfig::default();
+    assert!(
+        persistence_sampling_client(&generic)
+            .expect("non-Cursor persistence setup stays unchanged")
+            .is_some()
+    );
 }
 fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHandle {
     let (mock, _persistence_rx) = xai_chat_state::MockChatPersistence::new();

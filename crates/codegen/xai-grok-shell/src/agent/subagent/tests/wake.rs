@@ -302,6 +302,90 @@ async fn acknowledge_parent_usage(mut parent_cmd_rx: mpsc::UnboundedReceiver<Ses
     }
 }
 
+#[serial_test::serial]
+#[tokio::test(flavor = "current_thread")]
+async fn workflow_cursor_spawn_reaches_transport_through_child_session() {
+    use xai_grok_tools::implementations::grok_build::task::backend::{
+        ChannelBackend, SubagentBackend,
+    };
+    use xai_grok_tools::implementations::grok_build::task::coordinator::{
+        CoordinatorConfig, SubagentCoordinator,
+    };
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let id = uuid::Uuid::now_v7().to_string();
+            let server = xai_grok_sampler::test_support::FakeCursorServer::start(
+                id.clone(),
+                "cursor child complete",
+            )
+            .await;
+            let temp = tempfile::TempDir::new().expect("tempdir");
+            let meta_dir = temp.path().join("meta");
+            let persistence_dir = temp.path().join("session");
+            let cursor_model = "cursor/test-model";
+            let mut cursor_entry = test_model_entry(cursor_model);
+            cursor_entry.info.id = Some(cursor_model.to_owned());
+            cursor_entry.info.model_family = Some("cursor".to_owned());
+            cursor_entry.info.api_backend = crate::sampling::ApiBackend::Cursor;
+
+            let mut ctx = ctx_with_toggle(HashMap::new());
+            ctx.parent_cwd = temp.path().to_path_buf();
+            ctx.parent_session_id = "workflow-parent".to_owned();
+            ctx.parent_agent_name = Some("general-purpose".to_owned());
+            ctx.available_models
+                .insert(cursor_model.to_owned(), cursor_entry);
+            ctx.run_shell_child_harness = Some(RunShellChildHarnessConfig::new(
+                meta_dir.clone(),
+                InitialAttemptBehavior::Normal,
+            ));
+            ctx.setup_failure = Some(SubagentSetupFailure::Persistence {
+                meta_dir,
+                persistence_dir: persistence_dir.clone(),
+            });
+            let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
+            ctx.parent_cmd_tx = Some(parent_cmd_tx);
+            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+
+            let (gateway, _gateway_rx) = test_gateway_with_receiver();
+            let (command_tx, command_rx) =
+                SubagentCoordinator::<RunShellChildTestRunner>::channel();
+            let coordinator = tokio::task::spawn_local(
+                SubagentCoordinator::from_channel(
+                    command_rx,
+                    RunShellChildTestRunner::new([ctx], false, gateway),
+                    CoordinatorConfig::default(),
+                )
+                .run(),
+            );
+            let backend = ChannelBackend::for_coordinator_session(command_tx, "workflow-parent");
+            let mut request = auto_wake_test_request(&id);
+            request.prompt = "Respond once through Cursor".to_owned();
+            request.parent_session_id = "workflow-parent".to_owned();
+            request.runtime_overrides.model = Some(cursor_model.to_owned());
+            request.owner = SubagentOwner::workflow("workflow-run");
+            request.run_in_background = false;
+
+            let result = backend
+                .spawn(request, None)
+                .await
+                .expect("workflow child spawn");
+
+            assert!(result.success, "Cursor child failed: {:?}", result.error);
+            assert_eq!(result.output.as_ref(), "cursor child complete");
+            assert_eq!(server.run_requests(), 1);
+            assert!(persistence_dir.join("summary.json").is_file());
+            assert!(persistence_dir.join("chat_history.jsonl").is_file());
+
+            xai_grok_sampler::cancel_cursor_session(&id);
+            drop(backend);
+            coordinator.await.expect("coordinator");
+            usage_ack.abort();
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn unpublished_wake_completion_preserves_prior_durable_state_and_worktree() {
     xai_test_utils::require_git!();

@@ -77,7 +77,7 @@ async fn new_with_explicit_dir_overrides_worktree_stamp_so_subagent_stays_hidden
         },
         target_dir.clone(),
         default_model_id(),
-        sampling_client,
+        Some(sampling_client),
         "test-model".to_owned(),
         crate::session::persistence::ExplicitSessionOpen::New {
             identity: None,
@@ -111,7 +111,7 @@ async fn new_with_explicit_dir_stores_requested_identity() {
         },
         target_dir.clone(),
         default_model_id(),
-        OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap(),
+        Some(OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap()),
         "test-model".to_owned(),
         crate::session::persistence::ExplicitSessionOpen::New {
             identity: Some(ExplicitSessionIdentity {

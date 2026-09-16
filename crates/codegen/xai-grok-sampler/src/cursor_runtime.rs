@@ -210,17 +210,29 @@ pub(crate) async fn open_run_stream(
         ));
     }
     let tool_results = trailing_tool_results(&request)?;
+    #[cfg(any(test, feature = "test-support"))]
+    let test_transport = crate::cursor_transport::test_transport(session_id);
     let access_token = if tool_results.is_none() {
-        let resolver = config
-            .bearer_resolver
-            .as_deref()
-            .ok_or_else(|| cursor_missing_auth(None))?;
-        resolver.prepare_for_send().await;
-        Some(Zeroizing::new(
-            resolver
-                .current_bearer()
-                .ok_or_else(|| cursor_missing_auth(Some(resolver)))?,
-        ))
+        #[cfg(any(test, feature = "test-support"))]
+        let test_access_token = test_transport
+            .as_ref()
+            .map(|override_| override_.access_token.clone());
+        #[cfg(not(any(test, feature = "test-support")))]
+        let test_access_token: Option<String> = None;
+        if let Some(access_token) = test_access_token {
+            Some(Zeroizing::new(access_token))
+        } else {
+            let resolver = config
+                .bearer_resolver
+                .as_deref()
+                .ok_or_else(|| cursor_missing_auth(None))?;
+            resolver.prepare_for_send().await;
+            Some(Zeroizing::new(
+                resolver
+                    .current_bearer()
+                    .ok_or_else(|| cursor_missing_auth(Some(resolver)))?,
+            ))
+        }
     } else {
         None
     };
@@ -312,6 +324,13 @@ pub(crate) async fn open_run_stream(
                 )
             })?;
         drop(payload_build_slot);
+        #[cfg(any(test, feature = "test-support"))]
+        let transport = test_transport
+            .as_ref()
+            .map(|override_| override_.transport.clone())
+            .map_or_else(CursorRunTransport::new, Ok)
+            .map_err(transport_error)?;
+        #[cfg(not(any(test, feature = "test-support")))]
         let transport = CursorRunTransport::new().map_err(transport_error)?;
         let CursorRunPayload {
             initial_frame,
@@ -1977,6 +1996,7 @@ mod tests {
 
     #[derive(Default)]
     struct ServerState {
+        run_requests: usize,
         tool_call_id: String,
         returned_tool_result_is_error: Option<bool>,
         returned_tool_result_text: Option<String>,
@@ -2025,6 +2045,7 @@ mod tests {
             run.message,
             Some(agent_client_message::Message::RunRequest(_))
         ));
+        state.lock().expect("test server state").run_requests += 1;
         let tool_call_id = state
             .lock()
             .expect("test server state")
@@ -2178,6 +2199,15 @@ mod tests {
         (format!("https://localhost:{port}"), certificate, server)
     }
 
+    #[derive(Debug)]
+    struct FixedBearer;
+
+    impl crate::BearerResolver for FixedBearer {
+        fn current_bearer(&self) -> Option<String> {
+            Some("fixture-cursor-token".to_owned())
+        }
+    }
+
     fn request(model: &str, session_id: &str) -> ConversationRequest {
         ConversationRequest {
             items: vec![ConversationItem::User(UserItem {
@@ -2199,6 +2229,47 @@ mod tests {
             x_grok_session_id: Some(session_id.to_owned()),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn sampler_actor_routes_cursor_requests_through_dedicated_transport() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let server_state = Arc::new(Mutex::new(ServerState {
+            tool_call_id: "cursor-workflow-call".to_owned(),
+            ..ServerState::default()
+        }));
+        let (origin, certificate, server) = start_server(server_state.clone()).await;
+        let config = SamplerConfig {
+            api_backend: crate::ApiBackend::Cursor,
+            model: "test-model".to_owned(),
+            max_retries: Some(0),
+            bearer_resolver: Some(Arc::new(FixedBearer)),
+            ..Default::default()
+        };
+        let _transport = crate::cursor_transport::install_test_transport(
+            "workflow-cursor-child",
+            &origin,
+            certificate,
+            "fixture-token",
+        );
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sampler = crate::SamplerActor::spawn(config, crate::RetryPolicy::default(), event_tx);
+
+        let (response, _) = sampler
+            .submit_and_collect(
+                RequestId::from("workflow-cursor-spawn"),
+                request("test-model", "workflow-cursor-child"),
+            )
+            .await
+            .expect("spawned Cursor request reaches the dedicated transport");
+
+        assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+        assert_eq!(
+            server_state.lock().expect("test server state").run_requests,
+            1
+        );
+        cancel_cursor_session("workflow-cursor-child");
+        server.abort();
     }
 
     #[test]

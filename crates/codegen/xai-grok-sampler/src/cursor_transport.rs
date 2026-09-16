@@ -8,6 +8,9 @@ use std::convert::Infallible;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+#[cfg(any(test, feature = "test-support"))]
+use std::{collections::HashMap, sync::Mutex};
+
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use prost::Message;
@@ -469,6 +472,68 @@ impl std::fmt::Debug for CursorRunTransport {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+pub(crate) struct TestTransportOverride {
+    pub(crate) transport: CursorRunTransport,
+    pub(crate) access_token: String,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_transport_overrides() -> &'static Mutex<HashMap<String, TestTransportOverride>> {
+    static OVERRIDES: OnceLock<Mutex<HashMap<String, TestTransportOverride>>> = OnceLock::new();
+    OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn test_transport(session_id: &str) -> Option<TestTransportOverride> {
+    test_transport_overrides()
+        .lock()
+        .expect("Cursor test transport lock")
+        .get(session_id)
+        .cloned()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestCursorTransportGuard {
+    session_id: String,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_test_transport(
+    session_id: impl Into<String>,
+    origin: &str,
+    certificate: reqwest::Certificate,
+    access_token: impl Into<String>,
+) -> TestCursorTransportGuard {
+    let session_id = session_id.into();
+    let mut overrides = test_transport_overrides()
+        .lock()
+        .expect("Cursor test transport lock");
+    assert!(
+        !overrides.contains_key(&session_id),
+        "only one Cursor test transport may be installed per session"
+    );
+    overrides.insert(
+        session_id.clone(),
+        TestTransportOverride {
+            transport: CursorRunTransport::from_test_origin(origin, certificate),
+            access_token: access_token.into(),
+        },
+    );
+    TestCursorTransportGuard { session_id }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for TestCursorTransportGuard {
+    fn drop(&mut self) {
+        test_transport_overrides()
+            .lock()
+            .expect("Cursor test transport lock")
+            .remove(&self.session_id);
+    }
+}
+
 impl CursorRunTransport {
     pub(crate) fn new() -> Result<Self, CursorTransportError> {
         let agent_origin = resolve_agent_origin()?;
@@ -482,7 +547,7 @@ impl CursorRunTransport {
         Ok(Self { http, agent_origin })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_test_origin(origin: &str, certificate: reqwest::Certificate) -> Self {
         let http = Client::builder()
             .add_root_certificate(certificate)

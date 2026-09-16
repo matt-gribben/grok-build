@@ -209,6 +209,7 @@ tempfile = { workspace = true }
 # is `#[cfg(test)]`-only inside xai-grok-bundle without this feature.
 xai-grok-bundle = { workspace = true, features = ["test-support"] }
 xai-grok-memory = { workspace = true, features = ["test-support"] }
+xai-grok-sampler = { path = "../xai-grok-sampler", features = ["test-support"] }
 # sandbox-enforce: keep tests running against the enforcing sandbox build.
 xai-grok-workspace = { workspace = true, features = ["test-support", "sandbox-enforce"] }
 xai-grok-config = { workspace = true, features = [] }

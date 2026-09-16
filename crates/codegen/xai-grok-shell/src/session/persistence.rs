@@ -2764,7 +2764,7 @@ pub(crate) async fn new(
             relay_sync,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
-                    sampling_client,
+                    sampling_client: Some(sampling_client),
                     model: session_summary_model,
                     persistence_tx: summary_tx,
                 },
@@ -2800,7 +2800,7 @@ pub(crate) async fn new_with_explicit_dir(
     info: &Info,
     target_dir: PathBuf,
     model_id: acp::ModelId,
-    sampling_client: OaiCompatClient,
+    sampling_client: Option<OaiCompatClient>,
     session_summary_model: String,
     open: ExplicitSessionOpen,
 ) -> io::Result<PersistenceHandle> {
@@ -3001,7 +3001,7 @@ pub(crate) async fn load_light(
     tokio::task::spawn(async move {
         let mut summary_gen = crate::session::summary::SummaryGenerator::new(
             crate::session::summary::SummaryConfig {
-                sampling_client,
+                sampling_client: Some(sampling_client),
                 model: session_summary_model,
                 persistence_tx: summary_tx,
             },

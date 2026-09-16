@@ -5,6 +5,9 @@ version = "0.1.0"
 edition.workspace = true
 description = "Actor-based sampling/inference layer for xAI grok (HTTP streaming + retry, no shell coupling)"
 
+[features]
+test-support = ["dep:axum", "dep:axum-server", "dep:rcgen", "dep:rustls"]
+
 [dependencies]
 # Internal
 xai-grok-auth = { workspace = true }
@@ -19,6 +22,8 @@ thiserror = { workspace = true }
 # External
 async-openai = { workspace = true }
 async-stream = { workspace = true }
+axum = { workspace = true, optional = true }
+axum-server = { workspace = true, features = ["tls-rustls"], optional = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 blake3 = { workspace = true }
@@ -26,7 +31,9 @@ chrono = { workspace = true, features = ["serde"] }
 eventsource-stream = { workspace = true }
 futures-util = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
+rcgen = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["stream", "rustls-tls-native-roots"] }
+rustls = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 strum = { workspace = true }
