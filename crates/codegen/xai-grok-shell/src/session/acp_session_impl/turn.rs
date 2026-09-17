@@ -3173,10 +3173,6 @@ impl SessionActor {
                     "tokens_per_sec": tokens_per_sec,
                 })),
             );
-            if response.usage.is_some() {
-                self.send_available_commands_update(AdvertiseTrigger::UsageMeta)
-                    .await;
-            }
             turn_span_totals.record(&tracing::Span::current(), &response);
             let _ = self.compaction.auto_compact_suppressed.compare_exchange(
                 crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS,
@@ -3216,6 +3212,10 @@ impl SessionActor {
                 Some(model_duration_ms),
                 api_backend,
             );
+            if response.usage.is_some() {
+                self.send_available_commands_update(AdvertiseTrigger::UsageMeta)
+                    .await;
+            }
             let response_completed = self.response_completed_update(&response);
             if let Some(mut pt) = prompt_timing.take() {
                 pt.record_stream_latency(latency.time_to_last_byte_ms);

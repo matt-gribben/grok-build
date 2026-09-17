@@ -64,10 +64,10 @@ fn response_without_usage() -> ConversationResponse {
     }
 }
 
-/// A reasoning-capable Responses turn reports the live context after its output has already been included.
-/// Persisting that output must not add it again to the context sent to the pager or the pre-sampling compaction gate.
+/// A UsageMeta notification must see the accepted response's occupancy.
+/// Persisting a reasoning-capable response must not add its already-reported output again.
 #[tokio::test(flavor = "current_thread")]
-async fn response_reasoning_does_not_inflate_model_reported_context() {
+async fn usage_meta_notification_uses_model_reported_context_without_inflating_reasoning() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -131,11 +131,8 @@ async fn response_reasoning_does_not_inflate_model_reported_context() {
             );
 
             actor
-                .send_update(
-                    acp::SessionUpdate::AvailableCommandsUpdate(acp::AvailableCommandsUpdate::new(
-                        vec![],
-                    )),
-                    None,
+                .send_available_commands_update(
+                    crate::session::commands::AdvertiseTrigger::UsageMeta,
                 )
                 .await;
             let notification = event_rx.recv().await.expect("notification queued");
