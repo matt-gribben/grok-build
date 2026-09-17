@@ -1805,6 +1805,12 @@ impl SessionActor {
         self: &Arc<Self>,
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, xai_grok_sampler::SamplingErrorInfo> {
+        let response_api_backend = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|config| config.api_backend)
+            .unwrap_or_default();
         let request_id = xai_grok_sampler::RequestId::random();
         self.turn_phases.record_sampling_request();
         let _sampling_phase = self.turn_phases.begin_sampling();
@@ -1917,6 +1923,7 @@ impl SessionActor {
                 Ok(SamplerTurnOutcome::Response(
                     Box::new(response),
                     Box::new(metrics),
+                    response_api_backend,
                 ))
             }
             Err(rich_err) => {
@@ -2238,11 +2245,29 @@ impl SessionActor {
         response: &ConversationResponse,
         api_duration_ms: Option<u64>,
     ) {
+        self.record_response_token_usage_for_backend(
+            response,
+            api_duration_ms,
+            xai_grok_sampler::ApiBackend::default(),
+        );
+    }
+
+    pub(crate) fn record_response_token_usage_for_backend(
+        &self,
+        response: &ConversationResponse,
+        api_duration_ms: Option<u64>,
+        api_backend: xai_grok_sampler::ApiBackend,
+    ) {
         if let Some(ref u) = response.usage {
             self.tool_context
                 .record_task_model_output(u64::from(u.completion_tokens));
-            self.chat_state_handle
-                .record_token_usage(u64::from(u.total_tokens));
+            if api_backend == xai_grok_sampler::ApiBackend::Cursor {
+                self.chat_state_handle
+                    .record_incremental_token_usage(u64::from(u.completion_tokens));
+            } else {
+                self.chat_state_handle
+                    .record_token_usage(u64::from(u.total_tokens));
+            }
             self.chat_state_handle.record_last_turn_usage(u.clone());
             self.chat_state_handle.record_model_call_usage(
                 response.assistant().and_then(|a| a.model_id.clone()),

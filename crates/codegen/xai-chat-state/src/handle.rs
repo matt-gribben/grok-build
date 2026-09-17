@@ -8,7 +8,9 @@ use xai_grok_sampling_types::{
     ToolSpec, TraceContext,
 };
 
-use crate::commands::{ChatStateCommand, RepairHistoryBlocked, StrictAppendAck, StrictAppendError};
+use crate::commands::{
+    ActorCommand, ChatStateCommand, RepairHistoryBlocked, StrictAppendAck, StrictAppendError,
+};
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
     TurnCapture,
@@ -18,7 +20,19 @@ use crate::types::{
 /// This is cheap to clone and can be shared across tasks.
 #[derive(Clone)]
 pub struct ChatStateHandle {
-    cmd_tx: mpsc::UnboundedSender<ChatStateCommand>,
+    cmd_tx: ChatStateCommandSender,
+}
+
+#[derive(Clone)]
+struct ChatStateCommandSender(mpsc::UnboundedSender<ActorCommand>);
+
+impl ChatStateCommandSender {
+    fn send(
+        &self,
+        command: impl Into<ActorCommand>,
+    ) -> Result<(), mpsc::error::SendError<ActorCommand>> {
+        self.0.send(command.into())
+    }
 }
 
 /// The chat-state actor can no longer accept commands.
@@ -35,15 +49,19 @@ impl std::error::Error for ChatStateMailboxClosed {}
 
 impl ChatStateHandle {
     /// Create a new handle with the given command sender.
-    pub(crate) fn new(cmd_tx: mpsc::UnboundedSender<ChatStateCommand>) -> Self {
-        Self { cmd_tx }
+    pub(crate) fn new(cmd_tx: mpsc::UnboundedSender<ActorCommand>) -> Self {
+        Self {
+            cmd_tx: ChatStateCommandSender(cmd_tx),
+        }
     }
 
     /// Create a no-op handle that discards all commands.
     /// Useful for tests and situations where chat state tracking is not needed.
     pub fn noop() -> Self {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        Self { cmd_tx }
+        Self {
+            cmd_tx: ChatStateCommandSender(cmd_tx),
+        }
     }
 
     // ═══ Fire-and-forget mutations ═══
@@ -146,6 +164,13 @@ impl ChatStateHandle {
         let _ = self
             .cmd_tx
             .send(ChatStateCommand::RecordTokenUsage { total_tokens });
+    }
+
+    /// Add completion-only usage to the current context estimate.
+    pub fn record_incremental_token_usage(&self, completion_tokens: u64) {
+        let _ = self
+            .cmd_tx
+            .send(ActorCommand::RecordIncrementalTokenUsage { completion_tokens });
     }
 
     /// Stash the per-turn `TokenUsage` from the most recent model response.

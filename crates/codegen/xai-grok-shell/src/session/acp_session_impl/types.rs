@@ -64,6 +64,7 @@ pub(crate) enum SamplerTurnOutcome {
     Response(
         Box<ConversationResponse>,
         Box<xai_grok_sampler::InferenceLatencyStats>,
+        xai_grok_sampler::ApiBackend,
     ),
     CompactAndResubmit,
     /// Retry through the auth-retry schedule. Mirrors

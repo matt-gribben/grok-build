@@ -16,7 +16,7 @@ mod tests;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::commands::{ChatStateCommand, StrictAppendAck};
+use crate::commands::{ActorCommand, ChatStateCommand, StrictAppendAck};
 use crate::events::ChatStateEvent;
 use crate::handle::ChatStateHandle;
 use crate::persistence::ChatPersistence;
@@ -35,7 +35,7 @@ pub struct ChatStateActor {
     /// Persistence implementation — owned exclusively, called with `&mut self`.
     persistence: Box<dyn ChatPersistence>,
     /// Channel to receive commands from handles.
-    cmd_rx: mpsc::UnboundedReceiver<ChatStateCommand>,
+    cmd_rx: mpsc::UnboundedReceiver<ActorCommand>,
     /// Channel to send events to the session main loop.
     event_tx: mpsc::UnboundedSender<ChatStateEvent>,
     /// Cancellation token for graceful shutdown.
@@ -107,7 +107,12 @@ impl ChatStateActor {
                         debug!("ChatStateActor shutting down: all handles dropped");
                         break;
                     };
-                    self.handle_command(cmd).await;
+                    match cmd {
+                        ActorCommand::Public(cmd) => self.handle_command(cmd).await,
+                        ActorCommand::RecordIncrementalTokenUsage { completion_tokens } => {
+                            self.record_incremental_token_usage(completion_tokens);
+                        }
+                    }
                 }
             }
         }

@@ -416,6 +416,21 @@ impl ChatStateActor {
         self.send_event(ChatStateEvent::TokensUpdated { total_tokens });
     }
 
+    /// Advance accumulated token usage when the provider reports only output
+    /// tokens rather than the full context occupancy.
+    pub(super) fn record_incremental_token_usage(&mut self, completion_tokens: u64) {
+        let total_tokens = self
+            .state
+            .total_tokens
+            .saturating_add(self.state.estimated_tokens_since_model)
+            .saturating_add(completion_tokens);
+        self.state.estimated_tokens_since_model = 0;
+        self.state.estimate_at_last_response =
+            super::state::estimate_conversation_tokens(&self.state.conversation);
+        self.state.total_tokens = total_tokens;
+        self.send_event(ChatStateEvent::TokensUpdated { total_tokens });
+    }
+
     /// Stash the per-turn `TokenUsage` from the most recent model response.
     /// No event is emitted — this slot is read on demand at `PromptResponse`
     /// construction time, not pushed to subscribers.

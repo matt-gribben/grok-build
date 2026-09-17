@@ -2888,10 +2888,10 @@ impl SessionActor {
                     turn_parked,
                 )
                 .await;
-            let (response, latency) = match model_sampler_outcome {
-                Ok(SamplerTurnOutcome::Response(r, latency)) => {
+            let (response, latency, api_backend) = match model_sampler_outcome {
+                Ok(SamplerTurnOutcome::Response(r, latency, api_backend)) => {
                     salvage.response_arrived();
-                    (r, latency)
+                    (r, latency, api_backend)
                 }
                 Err(error) => {
                     if salvage.awaiting_continuation()
@@ -3173,9 +3173,7 @@ impl SessionActor {
                     "tokens_per_sec": tokens_per_sec,
                 })),
             );
-            if let Some(usage) = response.usage.as_ref() {
-                self.chat_state_handle
-                    .record_token_usage(u64::from(usage.total_tokens));
+            if response.usage.is_some() {
                 self.send_available_commands_update(AdvertiseTrigger::UsageMeta)
                     .await;
             }
@@ -3213,7 +3211,11 @@ impl SessionActor {
                     },
                 );
             }
-            self.record_response_token_usage(&response, Some(model_duration_ms));
+            self.record_response_token_usage_for_backend(
+                &response,
+                Some(model_duration_ms),
+                api_backend,
+            );
             let response_completed = self.response_completed_update(&response);
             if let Some(mut pt) = prompt_timing.take() {
                 pt.record_stream_latency(latency.time_to_last_byte_ms);
