@@ -383,6 +383,17 @@ pub enum ChatStateCommand {
     },
 }
 
+pub(crate) enum ActorCommand {
+    Public(ChatStateCommand),
+    RecordIncrementalTokenUsage { completion_tokens: u64 },
+}
+
+impl From<ChatStateCommand> for ActorCommand {
+    fn from(command: ChatStateCommand) -> Self {
+        Self::Public(command)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

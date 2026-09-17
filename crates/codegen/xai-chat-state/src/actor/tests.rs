@@ -169,7 +169,10 @@ fn user_messages_batch_uses_one_command() {
         .unwrap();
 
     let command = cmd_rx.try_recv().expect("one batch command");
-    let crate::commands::ChatStateCommand::PushUserMessagesBatch { items } = command else {
+    let crate::commands::ActorCommand::Public(
+        crate::commands::ChatStateCommand::PushUserMessagesBatch { items },
+    ) = command
+    else {
         panic!("expected user-message batch command");
     };
     assert_eq!(

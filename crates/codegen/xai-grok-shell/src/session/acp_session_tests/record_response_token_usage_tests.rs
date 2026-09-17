@@ -27,6 +27,28 @@ fn response_with_usage(total_tokens: u32) -> ConversationResponse {
     }
 }
 
+fn cursor_response_with_usage(completion_tokens: u32) -> ConversationResponse {
+    ConversationResponse {
+        items: vec![ConversationItem::assistant("ok")],
+        stop_reason: None,
+        usage: Some(TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens,
+            total_tokens: completion_tokens,
+            reasoning_tokens: 0,
+            cached_prompt_tokens: 0,
+            cache_creation_prompt_tokens: 0,
+        }),
+        cost_usd_ticks: None,
+        message_chunks_emitted: 1,
+        doom_loop_signals: Vec::new(),
+        stop_message: None,
+        message_id: None,
+        raw_stop_reason: None,
+        stop_sequence: None,
+    }
+}
+
 fn response_without_usage() -> ConversationResponse {
     ConversationResponse {
         items: vec![ConversationItem::assistant("ok")],
@@ -233,6 +255,53 @@ async fn updates_chat_state_total_tokens_from_response_usage() {
                     .totals
                     .model_calls,
                 1
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cursor_completion_only_usage_accumulates_across_tool_continuations() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(100_000, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            actor.record_response_token_usage_for_backend(
+                &cursor_response_with_usage(50),
+                None,
+                xai_grok_sampler::ApiBackend::Cursor,
+            );
+            assert_eq!(actor.chat_state_handle.get_total_tokens().await, 100_050);
+
+            actor
+                .chat_state_handle
+                .push_tool_result(ConversationItem::tool_result("call-1", "x".repeat(4000)));
+            actor.record_response_token_usage_for_backend(
+                &cursor_response_with_usage(75),
+                None,
+                xai_grok_sampler::ApiBackend::Cursor,
+            );
+
+            assert_eq!(
+                actor.chat_state_handle.get_total_tokens().await,
+                101_125,
+                "a completion-only continuation must add to prior occupancy and tool growth",
+            );
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .try_get_prompt_usage()
+                    .await
+                    .expect("chat-state alive")
+                    .expect("prompt ledger opened")
+                    .totals
+                    .model_calls,
+                2,
+                "Cursor billing remains per completed provider call",
             );
         })
         .await;
