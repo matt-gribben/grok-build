@@ -7,6 +7,9 @@ description = "Actor-based sampling/inference layer for xAI grok (HTTP streaming
 
 [features]
 test-support = ["dep:axum", "dep:axum-server", "dep:rcgen", "dep:rustls"]
+# Cargo release builds omit the mock constructor. Bazel enables this via
+# `default-bazel` so shell tests link the same rlib.
+default-bazel = ["test-support"]
 
 [dependencies]
 # Internal
@@ -42,6 +45,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 zeroize = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 # Mock HTTP server for actor / request_task integration tests.

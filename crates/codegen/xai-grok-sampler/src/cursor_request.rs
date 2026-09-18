@@ -643,6 +643,8 @@ mod tests {
                 xai_grok_sampling_types::ConversationItem::System(
                     xai_grok_sampling_types::conversation::SystemItem {
                         content: "Follow the repo rules".into(),
+                        synthetic_reason:
+                            xai_grok_sampling_types::conversation::SyntheticReason::Primary,
                     },
                 ),
                 xai_grok_sampling_types::ConversationItem::User(
@@ -703,6 +705,7 @@ mod tests {
                 content: std::sync::Arc::<str>::from(
                     "x".repeat(MAX_PREFLIGHT_CONVERSATION_BYTES + 1),
                 ),
+                synthetic_reason: xai_grok_sampling_types::conversation::SyntheticReason::Primary,
             },
         ));
         assert_eq!(

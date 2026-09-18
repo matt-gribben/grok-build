@@ -2479,6 +2479,7 @@ mod tests {
 
     async fn cursor_tool_identifier_resumes_the_same_run_stream(tool_call_id: &str) {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let generation = format!("testgen{}", uuid::Uuid::new_v4().simple());
         let server_state = Arc::new(Mutex::new(ServerState {
             tool_call_id: tool_call_id.to_owned(),
             ..ServerState::default()
@@ -2492,7 +2493,7 @@ mod tests {
             provider: "cursor",
             session_id: "cursor-runtime-test-session".to_owned(),
             model: "test-model".to_owned(),
-            generation: "testgeneration".to_owned(),
+            generation: generation.clone(),
         };
         let connection = transport
             .open(
@@ -2508,7 +2509,7 @@ mod tests {
             advertised_tools: payload.advertised_tools,
             tool_definitions: payload.advertised_tool_definitions,
             pending_execs: HashMap::new(),
-            generation: "testgeneration".to_owned(),
+            generation: generation.clone(),
             checkpoint: None,
             state_memory_permit: None,
             state_memory_units: 0,
@@ -2542,7 +2543,7 @@ mod tests {
         assert_eq!(tool_call.name, "read_file");
         let generated_id = tool_call
             .id
-            .strip_prefix("cursor-testgeneration-")
+            .strip_prefix(&format!("cursor-{generation}-"))
             .expect("provider generation prefix");
         if tool_call_id.is_empty() {
             assert!(uuid::Uuid::parse_str(generated_id).is_ok());
