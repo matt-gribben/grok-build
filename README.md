@@ -40,19 +40,6 @@ for the version of the code present in this tree.
 
 ## Installing the released binary
 
-Prebuilt binaries are published for macOS, Linux, and Windows:
-
-```sh
-curl -fsSL https://x.ai/cli/install.sh | bash   # macOS / Linux / Git Bash
-irm https://x.ai/cli/install.ps1 | iex          # Windows PowerShell
-grok --version
-```
-
-See the [changelog](https://x.ai/build/changelog) for the latest fixes,
-features, and improvements in each release.
-
-### Fork builds (matt-gribben/grok-build)
-
 This fork publishes GitHub Release binaries for macOS Apple Silicon, macOS
 Intel, and Linux x86_64. They install as **`grok-cursor`** (never `grok`) into
 `~/.grok-cursor`, so official `grok` / `~/.grok` and source-build
@@ -72,6 +59,17 @@ download, Gatekeeper may require:
 ```sh
 xattr -d com.apple.quarantine ~/.grok-cursor/libexec/grok-cursor
 ```
+
+Official Grok CLI binaries (installed as `grok`) are still at
+[x.ai/cli](https://x.ai/cli):
+
+```sh
+curl -fsSL https://x.ai/cli/install.sh | bash   # macOS / Linux / Git Bash
+irm https://x.ai/cli/install.ps1 | iex          # Windows PowerShell
+```
+
+See the [changelog](https://x.ai/build/changelog) for the latest official
+fixes, features, and improvements.
 
 ## Building from source
 
