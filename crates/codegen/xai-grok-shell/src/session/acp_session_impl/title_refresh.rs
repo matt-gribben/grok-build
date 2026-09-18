@@ -137,14 +137,14 @@ impl SessionActor {
             hosted_tools: Vec::new(),
             model: setup.model.clone(),
             reasoning_effort: setup.reasoning_effort,
-            backend: setup.client.api_backend(),
+            backend: setup.backend,
             conv_id: format!("title-refresh-{}", uuid::Uuid::new_v4()),
             req_id: format!("xai-title-refresh-{}", uuid::Uuid::new_v4()),
         });
 
         let response = match tokio::time::timeout(
             TITLE_REFRESH_MODEL_TIMEOUT,
-            setup.client.conversation_collect(request),
+            self.collect_side_call(&setup, request),
         )
         .await
         {
@@ -161,11 +161,7 @@ impl SessionActor {
                 return None;
             }
         };
-        super::side_call::log_prompt_cache_usage(
-            "title_refresh",
-            setup.client.api_backend(),
-            &response,
-        );
+        super::side_call::log_prompt_cache_usage("title_refresh", setup.backend, &response);
         let title = session_summary::clean_title_text(&response.assistant_text());
         if title.is_empty() {
             tracing::debug!("title refresh: model returned empty title");

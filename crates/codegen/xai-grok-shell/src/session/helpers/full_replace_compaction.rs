@@ -30,7 +30,8 @@ use crate::session::helpers::prepared_compaction_history::{
     PreparedCompactionHistory, build_compaction_chat_history,
 };
 use crate::session::helpers::session_compact::{
-    COMPACT_FAILED_PREFIX, CompactFailure, CompactOutput, generate_session_compact,
+    COMPACT_FAILED_PREFIX, CompactFailure, CompactOutput, generate_cursor_session_compact,
+    generate_session_compact,
 };
 
 #[derive(Default)]
@@ -54,7 +55,8 @@ pub(crate) struct ShellCompactionSampler {
     tools: Vec<ToolSpec>,
     hosted_tools: Vec<HostedTool>,
     compaction_tool_tokens: u64,
-    client: OaiCompatClient,
+    client: Option<OaiCompatClient>,
+    cursor_sampler: Option<xai_grok_sampler::SamplerHandle>,
     session_id: acp::SessionId,
     sampling_config: SamplingConfig,
     /// Per-chunk idle timeout forwarded to `generate_session_compact`.
@@ -75,7 +77,8 @@ impl ShellCompactionSampler {
         tools: Vec<ToolSpec>,
         hosted_tools: Vec<HostedTool>,
         compaction_tool_tokens: u64,
-        client: OaiCompatClient,
+        client: Option<OaiCompatClient>,
+        cursor_sampler: Option<xai_grok_sampler::SamplerHandle>,
         session_id: acp::SessionId,
         sampling_config: SamplingConfig,
         idle_timeout: Duration,
@@ -90,6 +93,7 @@ impl ShellCompactionSampler {
             hosted_tools,
             compaction_tool_tokens,
             client,
+            cursor_sampler,
             session_id,
             sampling_config,
             idle_timeout,
@@ -130,21 +134,46 @@ impl CompactionSampler for ShellCompactionSampler {
         );
         self.state.lock().unwrap().record_attempt(&chat_history);
 
-        match generate_session_compact(
-            chat_history,
-            self.compaction_tool_tokens,
-            self.tools.clone(),
-            self.hosted_tools.clone(),
-            self.client.clone(),
-            self.session_id.clone(),
-            &self.sampling_config,
-            self.idle_timeout,
-            self.wall_clock_budget_secs,
-            self.tool_choice,
-            &self.cancel,
-        )
-        .await
-        {
+        let compact_result =
+            if self.sampling_config.api_backend == xai_grok_sampling_types::ApiBackend::Cursor {
+                let Some(sampler) = self.cursor_sampler.as_ref() else {
+                    return Err(CompactionSampleError::Build(format!(
+                        "{COMPACT_FAILED_PREFIX}Cursor compaction needs the dedicated sampler Run"
+                    )));
+                };
+                generate_cursor_session_compact(
+                    chat_history,
+                    self.compaction_tool_tokens,
+                    sampler,
+                    self.session_id.clone(),
+                    &self.sampling_config,
+                    self.wall_clock_budget_secs,
+                    &self.cancel,
+                )
+                .await
+            } else {
+                let Some(client) = self.client.clone() else {
+                    return Err(CompactionSampleError::Build(format!(
+                        "{COMPACT_FAILED_PREFIX}sampling client missing"
+                    )));
+                };
+                generate_session_compact(
+                    chat_history,
+                    self.compaction_tool_tokens,
+                    self.tools.clone(),
+                    self.hosted_tools.clone(),
+                    client,
+                    self.session_id.clone(),
+                    &self.sampling_config,
+                    self.idle_timeout,
+                    self.wall_clock_budget_secs,
+                    self.tool_choice,
+                    &self.cancel,
+                )
+                .await
+            };
+
+        match compact_result {
             Ok(output) => {
                 let response = output.content.clone();
                 self.state.lock().unwrap().last_success = Some(output);
@@ -159,8 +188,8 @@ impl CompactionSampler for ShellCompactionSampler {
 }
 
 /// Map grok-build's [`CompactFailure`] onto the shared engine's [`CompactionSampleError`].
-/// `Overflow` → [`CompactionSampleError::ContextOverflow`] — sets the.
-/// `false`), so the engine retries it.
+/// `Overflow` → [`CompactionSampleError::ContextOverflow`] — the engine
+/// treats that as a deterministic overflow and retries with a smaller payload.
 fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleError {
     match failure {
         CompactFailure::Overflow(err) => {

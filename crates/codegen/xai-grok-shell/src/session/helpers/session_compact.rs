@@ -1,7 +1,7 @@
 use crate::sampling::{
     ApiBackend, ChatCompletionRequest, ChatRequestMessage, Client as OaiCompatClient,
-    ConversationRequest, ConversationToolChoice, HostedTool, SamplingError, ToolChoice,
-    ToolDefinition, ToolSpec, conversation_to_chat_messages,
+    ConversationItem, ConversationRequest, ConversationToolChoice, HostedTool, SamplingError,
+    ToolChoice, ToolDefinition, ToolSpec, conversation_to_chat_messages,
 };
 use agent_client_protocol as acp;
 use async_openai::types::responses::ResponseStreamEvent;
@@ -779,7 +779,7 @@ pub(crate) async fn generate_session_compact(
         ApiBackend::Cursor => {
             return Err(CompactFailure::Deterministic(
                 acp::Error::internal_error().data(format!(
-                    "{COMPACT_FAILED_PREFIX}Cursor does not support Grok's compaction side call"
+                    "{COMPACT_FAILED_PREFIX}Cursor compaction must use the dedicated sampler Run"
                 )),
             ));
         }
@@ -797,6 +797,108 @@ pub(crate) async fn generate_session_compact(
     } else {
         Ok(output)
     }
+}
+
+/// Compact a Cursor session through a tool-free `AgentService/Run` oneshot.
+/// Uses a distinct conversation id so the parked main-turn stream is left alone.
+pub(crate) fn cursor_oneshot_compact_request(
+    items: Vec<ConversationItem>,
+    session_id: &str,
+    model: &str,
+) -> ConversationRequest {
+    ConversationRequest {
+        items,
+        tools: vec![],
+        hosted_tools: vec![],
+        tool_choice: Some(ConversationToolChoice::None),
+        model: Some(model.to_owned()),
+        temperature: None,
+        reasoning_effort: None,
+        json_schema: None,
+        x_grok_conv_id: Some(format!("compact-{}", uuid::Uuid::new_v4())),
+        x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
+        x_grok_session_id: Some(session_id.to_owned()),
+        x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+        length_policy: xai_grok_sampling_types::LengthPolicy::Fail,
+        ..Default::default()
+    }
+}
+
+pub(crate) async fn generate_cursor_session_compact(
+    chat_history: impl Into<
+        crate::session::helpers::prepared_compaction_history::CompactionHistoryInput,
+    >,
+    compaction_tool_tokens: u64,
+    sampler: &xai_grok_sampler::SamplerHandle,
+    session_id: acp::SessionId,
+    sampling_config: &SamplingConfig,
+    wall_clock_budget_secs: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<CompactOutput, CompactFailure> {
+    if cancel.is_cancelled() {
+        return Err(CompactFailure::Cancelled);
+    }
+    let prepared_history = chat_history.into().prepare(compaction_tool_tokens);
+    let request = cursor_oneshot_compact_request(
+        prepared_history.items,
+        session_id.0.as_ref(),
+        &sampling_config.model,
+    );
+    tracing::info!(
+        compact_model = %sampling_config.model,
+        conv_id = request.x_grok_conv_id.as_deref().unwrap_or(""),
+        "Sending Cursor compact request (oneshot Run)"
+    );
+    let request_id = xai_grok_sampler::RequestId::random();
+    let collect = sampler.submit_and_collect(request_id, request);
+    let collected = if wall_clock_budget_secs > 0 {
+        await_unless_cancelled(
+            cancel,
+            tokio::time::timeout(
+                std::time::Duration::from_secs(wall_clock_budget_secs),
+                collect,
+            ),
+        )
+        .await?
+        .map_err(|_| {
+            CompactFailure::Transient(acp::Error::internal_error().data(format!(
+                "{COMPACT_FAILED_PREFIX}exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
+            )))
+        })?
+    } else {
+        await_unless_cancelled(cancel, collect).await?
+    };
+    let (response, metrics) = match collected {
+        Ok(pair) => pair,
+        Err(error) => return Err(classify_sampling_error(error)),
+    };
+    let content = response.assistant_text();
+    if content.is_empty() {
+        return Err(CompactFailure::Transient(
+            acp::Error::internal_error().data(format!(
+                "{COMPACT_FAILED_PREFIX}model returned empty response"
+            )),
+        ));
+    }
+    let truncated = matches!(
+        response.stop_reason,
+        Some(xai_grok_sampling_types::StopReason::Length)
+    );
+    Ok(CompactOutput {
+        content,
+        stop_reason: response
+            .stop_reason
+            .map(|reason| reason.as_ref().to_string()),
+        truncated,
+        ttft_ms: metrics.time_to_first_token_ms,
+        stream_ms: Some(
+            metrics
+                .time_to_last_byte_ms
+                .saturating_sub(metrics.time_to_first_token_ms.unwrap_or(0)),
+        ),
+        delta_count: u64::from(metrics.chunk_count),
+        itl_max_ms: metrics.itl_p99_ms,
+    })
 }
 
 /// Tests for `classify_sampling_error` and `classify_response_event_error`.
@@ -821,3 +923,7 @@ mod large_body_tests;
 #[cfg(test)]
 #[path = "session_compact_reasoning_compaction_regression_tests.rs"]
 mod reasoning_compaction_regression_tests;
+
+#[cfg(test)]
+#[path = "session_compact_cursor_oneshot_tests.rs"]
+mod cursor_oneshot_tests;

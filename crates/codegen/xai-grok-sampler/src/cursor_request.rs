@@ -197,6 +197,11 @@ pub(crate) fn build_cursor_run_payload(
     if model_id.is_empty() {
         return Err(CursorRequestError::UnsupportedSamplingOption);
     }
+    let conversation_id = request
+        .x_grok_conv_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| session_id.clone());
     let chat_request: ChatCompletionRequest = request.into();
     let current_user_index = chat_request
         .messages
@@ -367,7 +372,7 @@ pub(crate) fn build_cursor_run_payload(
             ..Default::default()
         }),
         mcp_tools: Some(McpTools { mcp_tools }),
-        conversation_id: Some(session_id.clone()),
+        conversation_id: Some(conversation_id.clone()),
         ..Default::default()
     };
     let initial_payload = AgentClientMessage {
@@ -381,7 +386,7 @@ pub(crate) fn build_cursor_run_payload(
     Ok(CursorRunPayload {
         initial_frame,
         blobs: blob_store.entries,
-        conversation_id: session_id,
+        conversation_id,
         model: model_id,
         advertised_tools,
         advertised_tool_definitions,
@@ -873,5 +878,15 @@ mod tests {
             build_cursor_run_payload(temperature).unwrap_err(),
             CursorRequestError::UnsupportedSamplingOption
         );
+    }
+
+    #[test]
+    fn distinct_conv_id_becomes_the_cursor_wire_conversation() {
+        let mut request = request();
+        request.x_grok_conv_id = Some("oneshot-compact-1".to_owned());
+        let payload = build_cursor_run_payload(request).expect("build request");
+        let run = decode_run(&payload);
+        assert_eq!(run.conversation_id.as_deref(), Some("oneshot-compact-1"));
+        assert_eq!(payload.conversation_id, "oneshot-compact-1");
     }
 }

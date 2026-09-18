@@ -117,6 +117,80 @@ fn parked_runs() -> &'static Mutex<HashMap<CursorBridgeKey, CursorRunState>> {
     PARKED_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+struct CursorConversationRotation {
+    wire_id: String,
+    succeeded: bool,
+}
+
+static CURSOR_CONVERSATION_ROTATIONS: OnceLock<Mutex<HashMap<String, CursorConversationRotation>>> =
+    OnceLock::new();
+
+fn cursor_conversation_rotations() -> &'static Mutex<HashMap<String, CursorConversationRotation>> {
+    CURSOR_CONVERSATION_ROTATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Overlay a rotated Cursor conversation id after the previous id was poisoned.
+/// Side calls pass a distinct `x_grok_conv_id` and keep that identity.
+pub(crate) fn resolved_cursor_conversation_id(session_id: &str, conv_id: Option<&str>) -> String {
+    let requested = conv_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(session_id);
+    if requested != session_id {
+        return requested.to_owned();
+    }
+    let rotations = cursor_conversation_rotations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    rotations
+        .get(session_id)
+        .map(|rotation| rotation.wire_id.clone())
+        .unwrap_or_else(|| session_id.to_owned())
+}
+
+/// Force a fresh Cursor conversation id for this Grok session and drop parked Runs.
+/// Used after local compaction so the next Run is not merged into the uncompacted server history.
+pub fn rotate_cursor_conversation(session_id: &str) -> String {
+    cancel_cursor_session(session_id);
+    let wire_id = uuid::Uuid::new_v4().to_string();
+    let mut rotations = cursor_conversation_rotations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    rotations.insert(
+        session_id.to_owned(),
+        CursorConversationRotation {
+            wire_id: wire_id.clone(),
+            succeeded: false,
+        },
+    );
+    wire_id
+}
+
+fn note_cursor_stream_poison(session_id: &str, saw_output: bool, error: &CursorTransportError) {
+    if saw_output || !matches!(error, CursorTransportError::ResourceExhausted) {
+        return;
+    }
+    let rotations = cursor_conversation_rotations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(current) = rotations.get(session_id)
+        && !current.succeeded
+    {
+        return;
+    }
+    drop(rotations);
+    rotate_cursor_conversation(session_id);
+}
+
+fn mark_cursor_conversation_healthy(session_id: &str) {
+    let mut rotations = cursor_conversation_rotations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(current) = rotations.get_mut(session_id) {
+        current.succeeded = true;
+    }
+}
+
 fn cursor_state_memory() -> std::sync::Arc<tokio::sync::Semaphore> {
     CURSOR_STATE_MEMORY
         .get_or_init(|| {
@@ -176,15 +250,10 @@ pub(crate) async fn open_run_stream(
     if request.model.is_none() {
         request.model = Some(config.model.clone());
     }
-    if request.temperature.is_none() {
-        request.temperature = config.temperature;
-    }
-    if request.top_p.is_none() {
-        request.top_p = config.top_p;
-    }
-    if request.reasoning_effort.is_none() {
-        request.reasoning_effort = config.reasoning_effort;
-    }
+    request.temperature = None;
+    request.top_p = None;
+    request.reasoning_effort = None;
+    request.json_schema = None;
     request.max_output_tokens =
         effective_output_limit(request.max_output_tokens, config.max_completion_tokens);
     let request_max_output_tokens = request.max_output_tokens;
@@ -198,6 +267,10 @@ pub(crate) async fn open_run_stream(
                 "Cursor requests need a stable Grok session identifier.".to_owned(),
             )
         })?;
+    request.x_grok_conv_id = Some(resolved_cursor_conversation_id(
+        session_id,
+        request.x_grok_conv_id.as_deref(),
+    ));
     let model = request
         .model
         .clone()
@@ -427,6 +500,7 @@ fn run_state_stream(
                 .map(|deadline: Instant| deadline.saturating_duration_since(Instant::now()));
             let remaining = batch_remaining.map_or(progress_remaining, |batch| batch.min(progress_remaining));
             if remaining.is_zero() && !state.pending_execs.is_empty() {
+                let used_tokens = checkpoint_used_tokens(&state);
                 if !park_cursor_run(&key, state) {
                     yield failed_event(&request_id, SamplingError::EventStreamError("Cursor tool continuation could not be retained within the local memory limit.".to_owned()));
                     return;
@@ -439,6 +513,7 @@ fn run_state_stream(
                     model,
                     Some(StopReason::ToolCalls),
                     output_tokens,
+                    used_tokens,
                     message_chunks_emitted,
                 );
                 yield SamplingEvent::Completed {
@@ -462,6 +537,7 @@ fn run_state_stream(
 
             let server_message = match incoming {
                 Err(_elapsed) if !state.pending_execs.is_empty() => {
+                    let used_tokens = checkpoint_used_tokens(&state);
                     if !park_cursor_run(&key, state) {
                         yield failed_event(&request_id, SamplingError::EventStreamError("Cursor tool continuation could not be retained within the local memory limit.".to_owned()));
                         return;
@@ -474,6 +550,7 @@ fn run_state_stream(
                         model,
                         Some(StopReason::ToolCalls),
                         output_tokens,
+                        used_tokens,
                         message_chunks_emitted,
                     );
                     yield SamplingEvent::Completed {
@@ -488,6 +565,11 @@ fn run_state_stream(
                     return;
                 }
                 Ok(Err(error)) => {
+                    note_cursor_stream_poison(
+                        &key.session_id,
+                        output_tokens > 0 || first_token_emitted,
+                        &error,
+                    );
                     yield failed_event(&request_id, transport_error(error));
                     return;
                 }
@@ -587,6 +669,7 @@ fn run_state_stream(
                         }
                         interaction_update::Message::TurnEnded(_) => {
                             if !state.pending_execs.is_empty() {
+                                let used_tokens = checkpoint_used_tokens(&state);
                                 if !park_cursor_run(&key, state) {
                                     yield failed_event(&request_id, SamplingError::EventStreamError("Cursor tool continuation could not be retained within the local memory limit.".to_owned()));
                                     return;
@@ -599,6 +682,7 @@ fn run_state_stream(
                                     model,
                                     Some(StopReason::ToolCalls),
                                     output_tokens,
+                                    used_tokens,
                                     message_chunks_emitted,
                                 );
                                 yield SamplingEvent::Completed {
@@ -782,6 +866,8 @@ fn run_state_stream(
         }
 
         let metrics = InferenceLatencyStats::from_timestamps(start, &timestamps, Instant::now());
+        let used_tokens = checkpoint_used_tokens(&state);
+        mark_cursor_conversation_healthy(&key.session_id);
         let response = build_response(
             content,
             reasoning,
@@ -789,6 +875,7 @@ fn run_state_stream(
             model,
             Some(StopReason::Stop),
             output_tokens,
+            used_tokens,
             message_chunks_emitted,
         );
         yield SamplingEvent::Completed {
@@ -832,6 +919,9 @@ fn transport_error(error: CursorTransportError) -> SamplingError {
             should_retry: Some(false),
             error_code: None,
         },
+        CursorTransportError::ResourceExhausted => SamplingError::EventStreamError(
+            "Connect error resource_exhausted: Cursor rejected this conversation.".to_owned(),
+        ),
         _ => SamplingError::EventStreamError(error.to_string()),
     }
 }
@@ -1454,9 +1544,7 @@ fn proto_value_to_json(value: prost_types::Value) -> serde_json::Value {
     use prost_types::value::Kind;
     match value.kind {
         Some(Kind::NullValue(_)) | None => serde_json::Value::Null,
-        Some(Kind::NumberValue(number)) => serde_json::Number::from_f64(number)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
+        Some(Kind::NumberValue(number)) => json_number_from_f64(number),
         Some(Kind::StringValue(text)) => serde_json::Value::String(text),
         Some(Kind::BoolValue(value)) => serde_json::Value::Bool(value),
         Some(Kind::StructValue(object)) => serde_json::Value::Object(
@@ -1472,6 +1560,29 @@ fn proto_value_to_json(value: prost_types::Value) -> serde_json::Value {
     }
 }
 
+fn json_number_from_f64(number: f64) -> serde_json::Value {
+    if !number.is_finite() {
+        return serde_json::Value::Null;
+    }
+    let as_int = number as i64;
+    if as_int as f64 == number {
+        return serde_json::Value::Number(as_int.into());
+    }
+    serde_json::Number::from_f64(number)
+        .map(serde_json::Value::Number)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn checkpoint_used_tokens(state: &CursorRunState) -> u32 {
+    state
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.token_details.as_ref())
+        .map(|details| details.used_tokens)
+        .filter(|used| *used > 0)
+        .unwrap_or(0)
+}
+
 fn build_response(
     content: String,
     reasoning: String,
@@ -1479,6 +1590,7 @@ fn build_response(
     model: String,
     stop_reason: Option<StopReason>,
     output_tokens: u32,
+    used_tokens: u32,
     message_chunks_emitted: u64,
 ) -> ConversationResponse {
     let mut items = Vec::with_capacity(2);
@@ -1498,9 +1610,14 @@ fn build_response(
         items,
         stop_reason,
         usage: Some(TokenUsage {
+            prompt_tokens: used_tokens,
             completion_tokens: output_tokens,
             reasoning_tokens: 0,
-            total_tokens: output_tokens,
+            total_tokens: if used_tokens > 0 {
+                used_tokens
+            } else {
+                output_tokens
+            },
             ..Default::default()
         }),
         cost_usd_ticks: None,
@@ -2508,5 +2625,80 @@ mod tests {
              fc_p16xCke-4SRMt5-02fe4358-aws_uw2_0",
         )
         .await;
+    }
+
+    #[test]
+    fn integer_valued_json_numbers_are_coerced_to_integers() {
+        let value = proto_value_to_json(prost_types::Value {
+            kind: Some(prost_types::value::Kind::NumberValue(80.0)),
+        });
+        assert_eq!(value, serde_json::json!(80));
+        assert!(value.as_u64() == Some(80) || value.as_i64() == Some(80));
+
+        let nested = proto_value_to_json(prost_types::Value {
+            kind: Some(prost_types::value::Kind::StructValue(prost_types::Struct {
+                fields: [(
+                    "offset".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::NumberValue(80.0)),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            })),
+        });
+        assert_eq!(nested["offset"], serde_json::json!(80));
+
+        let fractional = proto_value_to_json(prost_types::Value {
+            kind: Some(prost_types::value::Kind::NumberValue(1.5)),
+        });
+        assert_eq!(fractional, serde_json::json!(1.5));
+    }
+
+    #[test]
+    fn checkpoint_occupancy_replaces_completion_only_totals() {
+        let response = build_response(
+            "ok".into(),
+            String::new(),
+            Vec::new(),
+            "test-model".into(),
+            Some(StopReason::Stop),
+            50,
+            12_345,
+            1,
+        );
+        let usage = response.usage.expect("usage");
+        assert_eq!(usage.prompt_tokens, 12_345);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 12_345);
+    }
+
+    #[test]
+    fn zero_token_resource_exhausted_rotates_once_per_failure_streak() {
+        let base = format!("rotate-{}", uuid::Uuid::new_v4());
+        assert_eq!(resolved_cursor_conversation_id(&base, Some(&base)), base);
+        note_cursor_stream_poison(&base, false, &CursorTransportError::ResourceExhausted);
+        let rotated = resolved_cursor_conversation_id(&base, Some(&base));
+        assert_ne!(rotated, base);
+        note_cursor_stream_poison(&base, false, &CursorTransportError::ResourceExhausted);
+        assert_eq!(
+            resolved_cursor_conversation_id(&base, Some(&base)),
+            rotated,
+            "a second poison in the same streak must not rotate again"
+        );
+        mark_cursor_conversation_healthy(&base);
+        note_cursor_stream_poison(&base, false, &CursorTransportError::ResourceExhausted);
+        let rotated_again = resolved_cursor_conversation_id(&base, Some(&base));
+        assert_ne!(rotated_again, rotated);
+        assert_eq!(
+            resolved_cursor_conversation_id(&base, Some("oneshot-conv")),
+            "oneshot-conv"
+        );
+        note_cursor_stream_poison(&base, true, &CursorTransportError::ResourceExhausted);
+        assert_eq!(
+            resolved_cursor_conversation_id(&base, Some(&base)),
+            rotated_again,
+            "output tokens mean the conversation is not poisoned"
+        );
     }
 }

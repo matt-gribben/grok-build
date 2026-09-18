@@ -370,6 +370,8 @@ pub enum CursorTransportError {
     InvalidFrame,
     #[error("Cursor returned an error frame.")]
     RemoteError,
+    #[error("Cursor returned a resource_exhausted error.")]
+    ResourceExhausted,
     #[error("Cursor response buffering reached its process-wide memory limit.")]
     ResponseBufferLimit,
 }
@@ -1026,10 +1028,37 @@ fn validate_end_stream_frame(frame: &ConnectFrame) -> Result<(), CursorTransport
     }
     let value: serde_json::Value = serde_json::from_slice(&frame.payload)
         .map_err(|_| CursorTransportError::InvalidResponse)?;
-    if value.get("error").is_some() {
-        return Err(CursorTransportError::RemoteError);
+    if value.get("error").is_none() {
+        return Ok(());
     }
-    Ok(())
+    if connect_error_is_resource_exhausted(&value) {
+        return Err(CursorTransportError::ResourceExhausted);
+    }
+    Err(CursorTransportError::RemoteError)
+}
+
+fn connect_error_is_resource_exhausted(value: &serde_json::Value) -> bool {
+    let Some(error) = value.get("error") else {
+        return false;
+    };
+    let code = error.get("code");
+    if code.and_then(serde_json::Value::as_u64) == Some(8) {
+        return true;
+    }
+    let mut haystack = String::new();
+    if let Some(code) = code.and_then(serde_json::Value::as_str) {
+        haystack.push_str(code);
+        haystack.push(' ');
+    }
+    if let Some(message) = error.get("message").and_then(serde_json::Value::as_str) {
+        haystack.push_str(message);
+        haystack.push(' ');
+    }
+    if let Some(text) = error.as_str() {
+        haystack.push_str(text);
+    }
+    haystack.to_ascii_lowercase().contains("resource_exhausted")
+        || haystack.to_ascii_lowercase().contains("resource exhausted")
 }
 
 #[cfg(test)]
@@ -1052,6 +1081,37 @@ mod tests {
         agent_client_message, agent_server_message, interaction_update,
     };
     use crate::cursor_request::CursorRunPayload;
+
+    #[test]
+    fn connect_end_stream_classifies_resource_exhausted() {
+        assert!(connect_error_is_resource_exhausted(&serde_json::json!({
+            "error": { "code": "resource_exhausted", "message": "Error" }
+        })));
+        assert!(connect_error_is_resource_exhausted(&serde_json::json!({
+            "error": { "code": 8, "message": "quota" }
+        })));
+        assert!(connect_error_is_resource_exhausted(&serde_json::json!({
+            "error": "resource_exhausted"
+        })));
+        assert!(!connect_error_is_resource_exhausted(&serde_json::json!({
+            "error": { "code": "unavailable", "message": "try later" }
+        })));
+    }
+
+    #[test]
+    fn validate_end_stream_frame_returns_resource_exhausted() {
+        let frame = ConnectFrame {
+            flags: CONNECT_END_STREAM_FLAG,
+            payload: serde_json::to_vec(&serde_json::json!({
+                "error": { "code": 8, "message": "quota" }
+            }))
+            .expect("json"),
+        };
+        assert!(matches!(
+            validate_end_stream_frame(&frame),
+            Err(CursorTransportError::ResourceExhausted)
+        ));
+    }
 
     #[derive(Clone, Debug)]
     struct CapturedRunRequest {

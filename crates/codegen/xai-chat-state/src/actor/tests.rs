@@ -635,6 +635,33 @@ async fn estimated_tokens_tracks_tool_result_delta() {
 }
 
 #[tokio::test]
+async fn cursor_checkpoint_occupancy_floors_by_local_estimate() {
+    let h = TestHarness::new();
+    h.handle.record_token_usage(100_000);
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("call-1", "x".repeat(4000)));
+
+    h.handle.record_cursor_token_usage(100_200, 50);
+    assert_eq!(
+        h.handle.get_total_tokens().await,
+        101_000,
+        "local transcript growth must floor a compressed Cursor checkpoint"
+    );
+
+    h.handle.record_cursor_token_usage(150_000, 50);
+    assert_eq!(h.handle.get_total_tokens().await, 150_000);
+
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("call-2", "y".repeat(4000)));
+    h.handle.record_cursor_token_usage(0, 75);
+    assert_eq!(
+        h.handle.get_total_tokens().await,
+        151_075,
+        "a missing checkpoint still accumulates completion-only growth"
+    );
+}
+
+#[tokio::test]
 async fn estimated_tokens_resets_on_model_response() {
     let h = TestHarness::new();
     h.handle.record_token_usage(100_000);

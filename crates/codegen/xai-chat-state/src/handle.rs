@@ -173,6 +173,14 @@ impl ChatStateHandle {
             .send(ActorCommand::RecordIncrementalTokenUsage { completion_tokens });
     }
 
+    /// Record Cursor checkpoint occupancy, falling back to completion-only growth.
+    pub fn record_cursor_token_usage(&self, used_tokens: u64, completion_tokens: u64) {
+        let _ = self.cmd_tx.send(ActorCommand::RecordCursorTokenUsage {
+            used_tokens,
+            completion_tokens,
+        });
+    }
+
     /// Stash the per-turn `TokenUsage` from the most recent model response.
     /// Fire-and-forget — no ack returned.
     pub fn record_last_turn_usage(&self, usage: TokenUsage) {
