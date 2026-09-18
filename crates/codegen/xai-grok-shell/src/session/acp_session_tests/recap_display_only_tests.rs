@@ -1761,3 +1761,34 @@ async fn parent_cached_request_pins_fail_length_policy() {
         xai_grok_sampling_types::LengthPolicy::Fail
     );
 }
+
+/// Cursor side-calls must not reuse the parked main-turn conversation id, and
+/// must not send tools Cursor rejects on AgentService/Run.
+#[tokio::test]
+async fn parent_cached_request_cursor_keeps_unique_conv_id_and_strips_tools() {
+    let local = tokio::task::LocalSet::new();
+    let (actor, _gateway_rx) = local.run_until(build_actor()).await;
+    let request = actor.parent_cached_request(super::side_call::AuxCall {
+        items: Vec::new(),
+        tools: vec![xai_grok_sampling_types::ToolSpec {
+            name: "read_file".into(),
+            description: None,
+            parameters: serde_json::json!({}),
+        }],
+        hosted_tools: vec![xai_grok_sampling_types::HostedTool::WebSearch { options: None }],
+        model: "composer-2".to_string(),
+        reasoning_effort: Some(xai_grok_sampling_types::ReasoningEffort::High),
+        backend: crate::sampling::ApiBackend::Cursor,
+        conv_id: "recap-abc".to_string(),
+        req_id: "req".to_string(),
+    });
+    assert_eq!(request.x_grok_conv_id.as_deref(), Some("recap-abc"));
+    assert_eq!(
+        request.x_grok_session_id.as_deref(),
+        Some(actor.session_info.id.0.as_ref())
+    );
+    assert!(request.tools.is_empty());
+    assert!(request.hosted_tools.is_empty());
+    assert!(request.reasoning_effort.is_none());
+    assert_eq!(request.temperature, None);
+}

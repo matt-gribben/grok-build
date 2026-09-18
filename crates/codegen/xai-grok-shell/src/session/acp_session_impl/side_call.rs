@@ -80,7 +80,8 @@ pub(crate) struct AuxCall {
 
 /// Shared setup for a recap-style side-call; see [`SessionActor::prepare_side_call`].
 pub(crate) struct SideCallSetup {
-    pub(crate) client: xai_grok_sampler::SamplingClient,
+    pub(crate) client: Option<xai_grok_sampler::SamplingClient>,
+    pub(crate) backend: crate::sampling::ApiBackend,
     pub(crate) strip_reasoning: bool,
     pub(crate) context_window: u64,
     pub(crate) model: String,
@@ -106,20 +107,28 @@ impl SessionActor {
         // Only the Responses mapping sends the cache key
         // On the other backends the conv id is what ties a call to its conversation, so it has to stay the parent session id
         // The `btw-`/`recap-` label still shows up in `x_grok_req_id`
-        let conv_id = if call.backend.forwards_prompt_cache_key() {
+        let conv_id = if call.backend.forwards_prompt_cache_key()
+            || call.backend == crate::sampling::ApiBackend::Cursor
+        {
             call.conv_id
         } else {
             session_id.clone()
         };
+        let (tools, hosted_tools, reasoning_effort) =
+            if call.backend == crate::sampling::ApiBackend::Cursor {
+                (Vec::new(), Vec::new(), None)
+            } else {
+                (call.tools, call.hosted_tools, call.reasoning_effort)
+            };
         ConversationRequest {
             items: xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items)
                 .into_items(),
-            tools: call.tools,
-            hosted_tools: call.hosted_tools,
+            tools,
+            hosted_tools,
             model: Some(call.model),
             temperature: None,
             // Effort changes the prompt ahead of the conversation history, so dropping it here would share no prefix with the main turn.
-            reasoning_effort: call.reasoning_effort,
+            reasoning_effort,
             x_grok_conv_id: Some(conv_id),
             x_grok_req_id: Some(call.req_id),
             x_grok_session_id: Some(session_id.clone()),
@@ -136,24 +145,55 @@ impl SessionActor {
     /// Recap-style side-calls preserve reasoning so their conversation prefix stays byte-identical to the parent turn.
     /// Messages strips reasoning only when the matching effort cannot emit a top-level thinking configuration.
     pub(crate) async fn prepare_side_call(&self) -> Result<SideCallSetup, acp::Error> {
-        let client = self.prepare_chat_completion(false).await?;
-        // One config read serves the window, model, and reasoning effort.
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
+        let backend = sampling_config
+            .as_ref()
+            .map(|c| c.api_backend)
+            .unwrap_or_default();
+        let client = if backend == crate::sampling::ApiBackend::Cursor {
+            None
+        } else {
+            Some(self.prepare_chat_completion(false).await?)
+        };
         let context_window = sampling_config
             .as_ref()
             .map(|c| c.context_window.get())
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
         let reasoning_effort = sampling_config.as_ref().and_then(|c| c.reasoning_effort);
-        let strip_reasoning =
-            should_strip_side_call_reasoning(client.api_backend(), reasoning_effort);
+        let strip_reasoning = should_strip_side_call_reasoning(backend, reasoning_effort);
         let model = sampling_config.map(|c| c.model).unwrap_or_default();
         Ok(SideCallSetup {
             client,
+            backend,
             strip_reasoning,
             context_window,
             model,
             reasoning_effort,
         })
+    }
+
+    pub(crate) async fn collect_side_call(
+        &self,
+        setup: &SideCallSetup,
+        request: ConversationRequest,
+    ) -> Result<xai_grok_sampling_types::ConversationResponse, crate::sampling::SamplingError> {
+        if setup.backend == crate::sampling::ApiBackend::Cursor {
+            let collected = self
+                .sampler_handle
+                .submit_and_collect(xai_grok_sampler::RequestId::random(), request)
+                .await;
+            return collected.map(|(response, _)| response);
+        }
+        setup
+            .client
+            .as_ref()
+            .ok_or_else(|| {
+                crate::sampling::SamplingError::InvalidConfiguration(
+                    "side call is missing a sampling client",
+                )
+            })?
+            .conversation_collect(request)
+            .await
     }
 
     /// Build the cache-aligned request for a recap-style side-call via [`Self::parent_cached_request`].
@@ -176,7 +216,7 @@ impl SessionActor {
             hosted_tools,
             model: setup.model.clone(),
             reasoning_effort: setup.reasoning_effort,
-            backend: setup.client.api_backend(),
+            backend: setup.backend,
             conv_id: x_grok_conv_id,
             req_id: x_grok_req_id,
         })

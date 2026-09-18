@@ -13,7 +13,7 @@ use crate::session::helpers::compaction_context::CompactionInputs;
 use crate::session::helpers::compaction_context::to_system_reminder;
 use crate::session::helpers::session_compact::{
     COMPACT_FAILED_PREFIX, CompactOutput, CompactionOutcome, build_two_pass_compaction_prompt,
-    generate_session_compact, is_context_length_error,
+    generate_cursor_session_compact, generate_session_compact, is_context_length_error,
 };
 use crate::session::persistence::PersistenceMsg;
 use crate::session::two_pass::{
@@ -130,6 +130,31 @@ impl SessionActor {
     /// A long-lived borrow would race with turn/compact/cancel and panic on double-borrow.
     async fn two_pass_sample(&self, history: Vec<ConversationItem>) -> Option<CompactOutput> {
         let sampling_config = self.reconstruct_full_config().await;
+        let wall_clock_budget_secs = self
+            .agent
+            .borrow()
+            .compaction_policy()
+            .wall_clock_budget_secs;
+        let (cancel, _cancel_scope) = self.compaction.cancel.enter();
+        if sampling_config.api_backend == ApiBackend::Cursor {
+            return match generate_cursor_session_compact(
+                history,
+                0,
+                &self.sampler_handle,
+                self.session_info.id.clone(),
+                &sampling_config,
+                wall_clock_budget_secs,
+                &cancel,
+            )
+            .await
+            {
+                Ok(out) => Some(out),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "two_pass: Cursor summarization sample failed");
+                    None
+                }
+            };
+        }
         let client = match self.prepare_chat_completion(false).await {
             Ok(c) => c,
             Err(e) => {
@@ -140,13 +165,7 @@ impl SessionActor {
         let tool_defs = self.prepare_tool_definitions().await;
         let tools = self.turn_base_tool_specs(&tool_defs);
         let compaction_tool_tokens = xai_chat_state::estimate_tool_specs_tokens(&tools);
-        let wall_clock_budget_secs = self
-            .agent
-            .borrow()
-            .compaction_policy()
-            .wall_clock_budget_secs;
         let hosted_tools = self.hosted_tools_for_turn();
-        let (cancel, _cancel_scope) = self.compaction.cancel.enter();
         match generate_session_compact(
             history,
             compaction_tool_tokens,
@@ -995,22 +1014,35 @@ impl SessionActor {
             )));
         }
         let sampling_config = self.reconstruct_full_config().await;
-        let sampling_client = self.prepare_chat_completion(false).await?;
+        let is_cursor = sampling_config.api_backend == ApiBackend::Cursor;
+        let sampling_client = if is_cursor {
+            None
+        } else {
+            Some(self.prepare_chat_completion(false).await?)
+        };
+        let cursor_sampler = is_cursor.then(|| self.sampler_handle.clone());
         let backend_search_active = self.backend_search_active();
-        let effective_tool_defs: Vec<xai_grok_sampling_types::ToolDefinition> = self
-            .prepare_tool_definitions()
-            .await
-            .into_iter()
-            .filter(|td| !backend_search_active || td.function.name != "web_search")
-            .collect();
-        let compaction_tool_tokens =
-            xai_chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
-        let compaction_tools: Vec<xai_grok_sampling_types::ToolSpec> = effective_tool_defs
-            .into_iter()
-            .map(xai_grok_sampling_types::ToolSpec::from)
-            .collect();
-        let compaction_hosted_tools: Vec<xai_grok_sampling_types::HostedTool> =
-            self.hosted_tools_for_turn();
+        let (compaction_tools, compaction_hosted_tools, compaction_tool_tokens) = if is_cursor {
+            (Vec::new(), Vec::new(), 0)
+        } else {
+            let effective_tool_defs: Vec<xai_grok_sampling_types::ToolDefinition> = self
+                .prepare_tool_definitions()
+                .await
+                .into_iter()
+                .filter(|td| !backend_search_active || td.function.name != "web_search")
+                .collect();
+            let compaction_tool_tokens =
+                xai_chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
+            let compaction_tools: Vec<xai_grok_sampling_types::ToolSpec> = effective_tool_defs
+                .into_iter()
+                .map(xai_grok_sampling_types::ToolSpec::from)
+                .collect();
+            (
+                compaction_tools,
+                self.hosted_tools_for_turn(),
+                compaction_tool_tokens,
+            )
+        };
         if lossy_input {
             simplified_messages = xai_chat_state::compaction_utils::fit_conversation_to_budget(
                 simplified_messages,
@@ -1055,6 +1087,7 @@ impl SessionActor {
             compaction_hosted_tools.clone(),
             compaction_tool_tokens,
             sampling_client,
+            cursor_sampler,
             self.session_info.id.clone(),
             sampling_config.clone(),
             self.inference_idle_timeout,
@@ -1267,6 +1300,17 @@ impl SessionActor {
                     telemetry.transient_rejections as i64,
                 );
                 span.record("compaction_outcome", last_failure_outcome.as_ref());
+                if is_cursor {
+                    return self
+                        .apply_cursor_lossy_compact_fallback(
+                            last_error,
+                            auto_trigger,
+                            estimated_input_tokens,
+                            context_window,
+                            compaction_tool_tokens,
+                        )
+                        .await;
+                }
                 return Err(last_error.unwrap_or_else(|| {
                     acp::Error::internal_error().data("compaction failed: unknown error")
                 }));
@@ -1795,6 +1839,9 @@ impl SessionActor {
         let new_len = compacted_history.len();
         self.chat_state_handle
             .replace_conversation_for_compaction(compacted_history);
+        if is_cursor {
+            xai_grok_sampler::rotate_cursor_conversation(self.session_info.id.0.as_ref());
+        }
         if self.startup_hints.inherited_prefix_len.is_some() {
             let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
             if xai_token_estimation::exceeds_threshold(
@@ -2107,6 +2154,74 @@ impl SessionActor {
             ));
         }
     }
+    /// Mechanical Cursor fallback when a summarizer Run fails: drop older
+    /// turns to the lossy budget, rotate the wire conversation, and sticky-
+    /// suppress auto-compact if occupancy is still over the threshold.
+    async fn apply_cursor_lossy_compact_fallback(
+        &self,
+        last_error: Option<acp::Error>,
+        auto_trigger: bool,
+        estimated_input_tokens: u64,
+        context_window: u64,
+        compaction_tool_tokens: u64,
+    ) -> Result<(), acp::Error> {
+        let conversation = self.chat_state_handle.get_conversation().await;
+        let before = xai_chat_state::estimate_conversation_tokens(&conversation);
+        let fitted = xai_chat_state::compaction_utils::fit_conversation_to_budget(
+            conversation,
+            lossy_input_budget(context_window, compaction_tool_tokens),
+        );
+        let after = xai_chat_state::estimate_conversation_tokens(&fitted);
+        if after >= before {
+            let error = last_error.unwrap_or_else(|| {
+                acp::Error::internal_error().data("compaction failed: unknown error")
+            });
+            if auto_trigger {
+                self.suppress_auto_compaction(
+                    SuppressReason::Schema,
+                    &crate::sampling::error::acp_error_message(&error),
+                    estimated_input_tokens,
+                    context_window,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        tracing::warn!(
+            session_id = %self.session_info.id.0,
+            tokens_before = before,
+            tokens_after = after,
+            "Cursor summarizer failed; applied local lossy history trim"
+        );
+        let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
+        self.chat_state_handle
+            .record_compaction_at(prompt_index_at_compaction);
+        self.chat_state_handle
+            .replace_conversation_for_compaction(fitted);
+        xai_grok_sampler::rotate_cursor_conversation(self.session_info.id.0.as_ref());
+        let tokens_after = self.chat_state_handle.get_total_tokens().await;
+        if xai_token_estimation::exceeds_threshold(
+            tokens_after,
+            context_window,
+            self.compaction.threshold_percent.get(),
+        ) {
+            if auto_trigger {
+                self.suppress_auto_compaction(
+                    SuppressReason::Size,
+                    "lossy Cursor compact still over the context threshold",
+                    tokens_after,
+                    context_window,
+                )
+                .await;
+            }
+        } else {
+            self.compaction
+                .auto_compact_suppressed
+                .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     /// Compact without auto-continue. The outer turn loop rebuilds and retries.
     /// Emits telemetry (`auto_compact_fired`) and UI notifications automatically.
     #[tracing::instrument(

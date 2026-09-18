@@ -49,6 +49,31 @@ fn cursor_response_with_usage(completion_tokens: u32) -> ConversationResponse {
     }
 }
 
+fn cursor_response_with_checkpoint(
+    used_tokens: u32,
+    completion_tokens: u32,
+) -> ConversationResponse {
+    ConversationResponse {
+        items: vec![ConversationItem::assistant("ok")],
+        stop_reason: None,
+        usage: Some(TokenUsage {
+            prompt_tokens: used_tokens,
+            completion_tokens,
+            total_tokens: used_tokens,
+            reasoning_tokens: 0,
+            cached_prompt_tokens: 0,
+            cache_creation_prompt_tokens: 0,
+        }),
+        cost_usd_ticks: None,
+        message_chunks_emitted: 1,
+        doom_loop_signals: Vec::new(),
+        stop_message: None,
+        message_id: None,
+        raw_stop_reason: None,
+        stop_sequence: None,
+    }
+}
+
 fn response_without_usage() -> ConversationResponse {
     ConversationResponse {
         items: vec![ConversationItem::assistant("ok")],
@@ -300,6 +325,26 @@ async fn cursor_completion_only_usage_accumulates_across_tool_continuations() {
                 2,
                 "Cursor billing remains per completed provider call",
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cursor_checkpoint_occupancy_is_preferred_over_incremental() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(100_000, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            actor.record_response_token_usage_for_backend(
+                &cursor_response_with_checkpoint(150_000, 50),
+                None,
+                xai_grok_sampler::ApiBackend::Cursor,
+            );
+            assert_eq!(actor.chat_state_handle.get_total_tokens().await, 150_000);
         })
         .await;
 }

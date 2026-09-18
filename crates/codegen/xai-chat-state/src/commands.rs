@@ -385,7 +385,13 @@ pub enum ChatStateCommand {
 
 pub(crate) enum ActorCommand {
     Public(ChatStateCommand),
-    RecordIncrementalTokenUsage { completion_tokens: u64 },
+    RecordIncrementalTokenUsage {
+        completion_tokens: u64,
+    },
+    RecordCursorTokenUsage {
+        used_tokens: u64,
+        completion_tokens: u64,
+    },
 }
 
 impl From<ChatStateCommand> for ActorCommand {

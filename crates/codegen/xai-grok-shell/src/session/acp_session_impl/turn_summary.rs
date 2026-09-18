@@ -85,18 +85,14 @@ impl SessionActor {
             )
             .await;
 
-        let response = match setup.client.conversation_collect(request).await {
+        let response = match self.collect_side_call(&setup, request).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "turn summary: model call failed");
                 return;
             }
         };
-        super::side_call::log_prompt_cache_usage(
-            "turn_summary",
-            setup.client.api_backend(),
-            &response,
-        );
+        super::side_call::log_prompt_cache_usage("turn_summary", setup.backend, &response);
         let summary = turn_summary::clean_turn_summary_text(&response.assistant_text());
         if summary.is_empty() {
             tracing::debug!("turn summary: model returned empty summary");

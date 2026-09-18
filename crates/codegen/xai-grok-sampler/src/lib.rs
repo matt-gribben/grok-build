@@ -48,7 +48,7 @@ pub use config::{
     AuthScheme, BearerResolver, HeaderInjector, OriginClientInfo, RetryPolicy, SamplerConfig,
     SharedBearerResolver, SharedHeaderInjector,
 };
-pub use cursor_runtime::cancel_cursor_session;
+pub use cursor_runtime::{cancel_cursor_session, rotate_cursor_conversation};
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{
     SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason,

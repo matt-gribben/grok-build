@@ -112,6 +112,12 @@ impl ChatStateActor {
                         ActorCommand::RecordIncrementalTokenUsage { completion_tokens } => {
                             self.record_incremental_token_usage(completion_tokens);
                         }
+                        ActorCommand::RecordCursorTokenUsage {
+                            used_tokens,
+                            completion_tokens,
+                        } => {
+                            self.record_cursor_token_usage(used_tokens, completion_tokens);
+                        }
                     }
                 }
             }

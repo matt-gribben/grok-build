@@ -2262,8 +2262,10 @@ impl SessionActor {
             self.tool_context
                 .record_task_model_output(u64::from(u.completion_tokens));
             if api_backend == xai_grok_sampler::ApiBackend::Cursor {
-                self.chat_state_handle
-                    .record_incremental_token_usage(u64::from(u.completion_tokens));
+                self.chat_state_handle.record_cursor_token_usage(
+                    u64::from(u.prompt_tokens),
+                    u64::from(u.completion_tokens),
+                );
             } else {
                 self.chat_state_handle
                     .record_token_usage(u64::from(u.total_tokens));

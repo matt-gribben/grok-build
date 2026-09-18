@@ -49,8 +49,8 @@ impl SessionActor {
         let parent_session_id = self.session_info.id.to_string();
         let asked_at = chrono::Utc::now();
 
-        let sampling_client = self
-            .prepare_chat_completion(false)
+        let setup = self
+            .prepare_side_call()
             .await
             .map_err(|e| SideQuestionError::PrepareClient(e.to_string()))?;
 
@@ -59,10 +59,7 @@ impl SessionActor {
 
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
         let reasoning_effort = sampling_config.as_ref().and_then(|c| c.reasoning_effort);
-        if super::side_call::should_strip_side_call_reasoning(
-            sampling_client.api_backend(),
-            reasoning_effort,
-        ) {
+        if super::side_call::should_strip_side_call_reasoning(setup.backend, reasoning_effort) {
             items = xai_chat_state::compaction_utils::strip_reasoning_blocks(items);
         }
 
@@ -98,17 +95,17 @@ impl SessionActor {
             hosted_tools,
             model: model.clone(),
             reasoning_effort,
-            backend: sampling_client.api_backend(),
+            backend: setup.backend,
             conv_id: btw_session_id.clone(),
             req_id: format!("xai-btw-{}", uuid::Uuid::new_v4()),
         });
 
-        // conversation_collect is one-shot (no sampler-actor retry)
+        // conversation_collect / sampler collect is one-shot (no sampler-actor retry)
         // /btw adds its own bounded transient-failure retry (the policy and predicate above)
         use backon::Retryable as _;
         let attempts = std::cell::Cell::new(1u32);
         let result =
-            (|| sampling_client.conversation_collect(build_side_question_attempt(&base_request)))
+            (|| self.collect_side_call(&setup, build_side_question_attempt(&base_request)))
                 .retry(side_question_retry_policy())
                 .when(should_retry_side_question)
                 .notify(|e: &SamplingError, backoff: std::time::Duration| {
@@ -123,7 +120,7 @@ impl SessionActor {
 
         match result {
             Ok(response) => {
-                log_prompt_cache_usage("btw", sampling_client.api_backend(), &response);
+                log_prompt_cache_usage("btw", setup.backend, &response);
                 let content = response.assistant_text();
                 if content.is_empty() {
                     let err = SideQuestionError::EmptyResponse;
@@ -261,7 +258,7 @@ impl SessionActor {
         // The artifact records the exact model-facing items after trust projection; the canonical conversation state remains raw
         let chat_history_for_artifact = request.items.clone();
 
-        let response = match setup.client.conversation_collect(request).await {
+        let response = match self.collect_side_call(&setup, request).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "recap: model call failed");
@@ -287,7 +284,7 @@ impl SessionActor {
             }
         };
 
-        log_prompt_cache_usage("recap", setup.client.api_backend(), &response);
+        log_prompt_cache_usage("recap", setup.backend, &response);
         let raw_response = response.assistant_text();
         let summary = session_recap::clean_recap_text(&raw_response);
         if summary.is_empty() {

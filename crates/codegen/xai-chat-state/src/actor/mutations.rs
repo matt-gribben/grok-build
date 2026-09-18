@@ -431,6 +431,21 @@ impl ChatStateActor {
         self.send_event(ChatStateEvent::TokensUpdated { total_tokens });
     }
 
+    /// Prefer Cursor checkpoint occupancy, floored by last occupancy plus
+    /// unreported local growth so a compressed wire request cannot hide
+    /// tool-result expansion.
+    pub(super) fn record_cursor_token_usage(&mut self, used_tokens: u64, completion_tokens: u64) {
+        if used_tokens == 0 {
+            self.record_incremental_token_usage(completion_tokens);
+            return;
+        }
+        let local = self
+            .state
+            .total_tokens
+            .saturating_add(self.state.estimated_tokens_since_model);
+        self.record_token_usage(used_tokens.max(local));
+    }
+
     /// Stash the per-turn `TokenUsage` from the most recent model response.
     /// No event is emitted — this slot is read on demand at `PromptResponse`
     /// construction time, not pushed to subscribers.
